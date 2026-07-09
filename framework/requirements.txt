@@ -1,0 +1,7 @@
+# JDO 测试框架依赖（脚本作者本地环境）
+pytest>=8.0
+uiautomator2>=3.0        # 元素交互（openatx）
+adbutils>=2.0            # 系统级：am start / dumpsys / logcat / 录屏
+pytest-json-report>=1.5  # 平台执行引擎解析结果用
+allure-pytest>=2.13      # Allure 报告
+pytest-xdist>=3.5        # 多设备并行（后期）

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<!--
+  JDO 车机自动化测试平台 · 前端外壳
+  ─ 免构建静态工程：改完刷新即生效，无 node/打包依赖
+  ─ DOM 结构与 doc/原型-交互版.html 完全一致，保证观感/交互对齐
+  ─ 分层：css/(设计token+组件样式) · js/(api/store/ui/theme/router) · js/views/(每模块一文件)
+  ─ 图标与图表库已本地化到 vendor/（台架内网无外网也可用）
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JDO 车机自动化测试平台</title>
+<link rel="stylesheet" href="vendor/tabler-icons.min.css">
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/components.css">
+<script src="vendor/chart.umd.min.js"></script>
+</head>
+<body>
+<!-- .jdo 上的内联变量 = 默认「柔和」深色主题（与原型一致），主题切换由 js/theme.js 管理 -->
+<div class="jdo" style="--color-background-primary:#2b3646; --color-background-secondary:#323e4f; --color-background-tertiary:#1e2836; --color-text-primary:#e8edf4; --color-text-secondary:#98a4b5; --color-text-tertiary:#6b7889; --color-border-tertiary:rgba(255,255,255,0.08); --color-border-secondary:rgba(255,255,255,0.15); --color-text-info:#46c8d5; --color-background-info:rgba(70,200,213,0.15); --color-border-info:rgba(70,200,213,0.5); --color-text-success:#4dd497; --color-background-success:rgba(77,212,151,0.16); --color-text-danger:#ef7088; --color-background-danger:rgba(239,112,136,0.16); --color-text-warning:#e6b25f; --color-background-warning:rgba(230,178,95,0.16);">
+<h2 class="sr-only">JDO 车机自动化测试平台。</h2>
+
+<!-- 平台主框架：侧边栏 + 主区（顶部栏 + 内容）。主题切换已并入顶栏右侧。 -->
+<div id="frame" style="position:relative; display: flex; background: #232e3d; border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg); overflow: hidden; flex: 1; min-height: 0;">
+  <div id="sidebar" style="width: 158px; flex-shrink: 0; border-right: 0.5px solid var(--color-border-tertiary); background: #1b2431; display:flex; flex-direction:column;">
+    <div style="padding: 12px 13px; border-bottom: 0.5px solid var(--color-border-tertiary);">
+      <div style="display:flex;align-items:center;gap:8px;font-weight:500;font-size:13px;color:var(--color-text-primary);"><span style="width:24px;height:24px;border-radius:7px;background:var(--color-background-info);color:var(--color-text-info);display:flex;align-items:center;justify-content:center;"><i class="ti ti-car" style="font-size: 15px;" aria-hidden="true"></i></span>JDO 测试平台</div>
+      <div style="font-size:10.5px;color:var(--color-text-tertiary);margin-top:5px;padding-left:32px;">车机生态自动化回归</div>
+    </div>
+    <div id="side" style="padding: 6px 8px 12px; flex:1; min-height:0; overflow-y:auto;"></div>
+    <!-- 侧栏底部用户区：登录成功后由 js 更新姓名/角色/头像首字 -->
+    <div id="userbox" style="border-top:0.5px solid var(--color-border-tertiary);padding:9px 11px;display:flex;align-items:center;gap:8px;">
+      <span id="userAvatar" style="width:26px;height:26px;border-radius:50%;background:var(--color-background-info);color:var(--color-text-info);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:500;flex-shrink:0;">张</span>
+      <div style="flex:1;min-width:0;line-height:1.25;"><div id="userName" style="font-size:12px;color:var(--color-text-primary);">张三</div><div id="userRole" style="font-size:10.5px;color:var(--color-text-tertiary);">管理员</div></div>
+      <button id="logoutBtn" class="iconbtn" title="退出登录" aria-label="退出登录" style="width:24px;height:24px;"><i class="ti ti-logout" aria-hidden="true"></i></button>
+    </div>
+  </div>
+  <div id="main" style="flex:1;min-width:0;display:flex;flex-direction:column;">
+    <div id="topbar" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 16px;border-bottom:0.5px solid var(--color-border-tertiary);">
+      <div id="crumb" style="font-size:13px;"></div>
+      <div style="display:flex;align-items:center;gap:13px;">
+        <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--color-text-secondary);"><span id="svcDot" style="width:7px;height:7px;border-radius:50%;background:var(--color-text-success);display:inline-block;"></span><span id="svcText">服务正常</span> · <span id="svcTime" style="font-family:var(--font-mono);font-size:11.5px;"></span></span>
+        <!-- 主题切换：由页头独立行移入顶栏右侧（省出一行高度） -->
+        <span style="display:inline-flex;align-items:center;gap:7px;padding-left:13px;border-left:0.5px solid var(--color-border-tertiary);"><span style="font-size:12px;color:var(--color-text-secondary);">主题</span><span id="themebar" style="display:inline-flex;gap:4px;"></span></span>
+      </div>
+    </div>
+    <div id="content" style="flex:1;min-width:0;min-height:0;overflow-y:auto;padding:18px 18px 22px;"></div>
+  </div>
+</div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

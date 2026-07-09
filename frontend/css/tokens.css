@@ -1,0 +1,19 @@
+/* 设计变量（与原型一致）
+   :root 为「原版」浅色主题的基础值；「柔和」深色主题通过 js/theme.js
+   在 .jdo 元素上覆写同名变量实现（切回原版 = 移除覆写）。 */
+:root{
+  --color-background-primary:#ffffff; --color-background-secondary:#f4f4f2; --color-background-tertiary:#ececea;
+  --color-text-primary:#1d1d1f; --color-text-secondary:#6e6e73; --color-text-tertiary:#9a9aa0;
+  --color-border-tertiary:rgba(0,0,0,.10); --color-border-secondary:rgba(0,0,0,.18); --color-border-info:rgba(14,116,144,.5);
+  --color-text-info:#0e7490; --color-background-info:rgba(14,116,144,.10);
+  --color-text-success:#15803d; --color-background-success:rgba(21,128,61,.12);
+  --color-text-danger:#b91c1c; --color-background-danger:rgba(185,28,28,.10);
+  --color-text-warning:#a16207; --color-background-warning:rgba(161,98,7,.12);
+  --border-radius-md:8px; --border-radius-lg:12px; --border-radius-xl:16px;
+  --font-mono:ui-monospace,Consolas,"Courier New",monospace; --font-sans:system-ui,"Microsoft YaHei",sans-serif;
+}
+/* 整页布局：锁定视口高度、禁止整页滚动 —— 框架尺寸恒定，长内容在内容区内部滚动
+   （原型是内嵌小组件外框随内容伸缩，全屏平台改为标准管理后台行为，切页不跳动） */
+body{margin:0;padding:16px;height:100vh;box-sizing:border-box;overflow:hidden;background:var(--color-background-tertiary);font-family:var(--font-sans)}
+.jdo{height:100%;display:flex;flex-direction:column;}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}

@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 运行时数据（删除 backend/data/jdo.db 可重置为种子库）
+backend/data/
+
+# 测试产物（Allure 结果 / 失败现场）
+reports/
+
+# IDE / 系统
+.idea/
+.vscode/
+Thumbs.db
+
+# Claude Code 本机配置（launch.json 共享，local 设置不进库）
+.claude/settings.local.json
