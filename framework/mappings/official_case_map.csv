@@ -1,0 +1,4 @@
+case_id,nodeid,coverage,status
+KW-PLAY-008,testcases/kuwo/test_kuwo_play.py::test_kuwo_play_pause,播放/暂停恢复,automated
+KW-SRCH-002,testcases/kuwo/test_kuwo_search.py::test_kuwo_search_play,搜索结果点播,automated
+KW-PLAY-005,testcases/kuwo/test_kuwo_switch.py::test_kuwo_switch_next,切下一首,automated

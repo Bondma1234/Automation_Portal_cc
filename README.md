@@ -39,6 +39,7 @@ python -m uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8770
 ├─ framework/               # 我们自己的 pytest + uiautomator2 测试框架（脚本作者工作区）
 │  ├─ config/  core/        #   平台组维护：设备/adb/页面基类
 │  ├─ pages/   testcases/   #   脚本作者编写（见 doc/脚本框架规范.md）
+│  ├─ mappings/             #   官方用例映射盘点表（人读；平台以 case 标记为准）
 │  └─ conftest.py           #   设备注入 + case 标记上报 + 失败现场采集
 └─ doc/                     # 需求/原型/项目/上下文/脚本规范 文档
 ```
@@ -56,6 +57,7 @@ python -m uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8770
   - **Media_automation**（ADB-XML dump 驱动，docs CSV 映射）；
   - **Media_automation_Zcode**（u2 驱动，markdown 覆盖矩阵映射）。
   上传 zip 自动识别框架；共用执行内核 `runner_common`（解压/进度插件/实时点亮矩阵），各适配器只写映射解析 + 设备注入差异。
+  「脚本管理 → 框架脚手架」可**三套切换预览**（目录树 + 目录职责说明 + 文件内容）：jdo 下载脚手架 zip，外部框架下载上传原包。
 - **执行引擎**（`services/run_service.py`）：策略式 —— 品牌台架可达则真机跑该框架的 pytest（实时进度/Allure/落库），
   否则回退与原型节奏一致的模拟执行。两个入口：**按任务**（执行中心选任务，按覆盖最多的框架路由）、
   **按脚本**（脚本管理点「执行」，直接跑该脚本对应框架，不受路由）。

@@ -85,7 +85,7 @@ _SCAFFOLD_README = "\n".join([
 ]) + "\n"
 
 # 预览时对文本文件读取内容的后缀白名单与大小上限
-_TEXT_EXTS = {".py", ".md", ".ini", ".txt", ".cfg", ".yaml", ".yml"}
+_TEXT_EXTS = {".py", ".md", ".ini", ".txt", ".cfg", ".yaml", ".yml", ".csv", ".json", ".bat"}
 _PREVIEW_MAX = 200 * 1024
 
 # 脚手架各目录说明（依《脚本框架规范》的角色分工，预览目录树里展示）
@@ -93,6 +93,7 @@ SCAFFOLD_DIR_DESC = {
     "framework": "测试框架根目录（解压后整个文件夹放到工作目录）",
     "framework/config": "框架配置：设备地址、被测包名与各模块入口 Activity",
     "framework/core": "平台组维护的底座：设备连接 / adb 封装 / 页面基类（脚本作者勿改）",
+    "framework/mappings": "功能用例映射：维护 pytest nodeid 与官方功能用例编号的对应关系，供覆盖盘点与规划（平台以脚本内 @pytest.mark.case 标记为准）",
     "framework/pages": "页面对象层（Page Object）：元素定位与动作封装，脚本作者编写",
     "framework/pages/kuwo": "酷我音乐页面对象",
     "framework/testcases": "用例目录：脚本作者编写，文件名 test_ 开头",
@@ -127,6 +128,107 @@ def scaffold_manifest() -> list:
                   "size": len(_SCAFFOLD_README.encode("utf-8")),
                   "content": _SCAFFOLD_README, "text": True})
     return items
+
+
+# ---------------- 多框架预览：Zcode / Media_automation 最新上传包的目录树 ----------------
+
+# 预览 tab 标识 → scripts.framework 值
+_FW_KEYS = {"zcode": config.FRAMEWORK_ZCODE, "media": config.FRAMEWORK_MEDIA}
+
+# 目录树里跳过的目录（版本库 / 缓存 / 运行产物，看包结构时是噪音）
+_PREVIEW_SKIP_DIRS = {"__pycache__", ".git", ".pytest_cache", ".vscode", ".idea",
+                      "output", "outputs", "logs", "allure-results", "allure-report",
+                      "screenshots", "reports"}
+
+# 两套外部框架的目录职责说明：按「目录名」匹配（无论包内嵌套层级）；"" 为整包一句话说明
+_FW_DIR_DESC = {
+    config.FRAMEWORK_MEDIA: {
+        "": "Media_automation：ADB + XML dump 驱动（不依赖 uiautomator2），设备走 MEDIA_DEVICE_SERIAL 环境变量注入",
+        "config": "配置与设备档案：settings 读 MEDIA_DEVICE_SERIAL / MEDIA_PROFILE 环境变量选台架与被测应用",
+        "docs": "文档 + 官方用例映射 CSV（*mapping*.csv —— 平台覆盖率与执行映射的数据源）",
+        "drivers": "驱动层：adb 命令封装与 UI XML dump 解析（点击 / 输入 / 找元素）",
+        "helpers": "通用工具：等待重试 / 日志 / 文本处理",
+        "pagelocators": "元素定位仓库：各页面元素的 XML 属性定位表达式",
+        "pageobjects": "页面对象层：页面动作封装（组合 drivers + pagelocators）",
+        "tests": "pytest 用例目录",
+    },
+    config.FRAMEWORK_ZCODE: {
+        "": "Media_automation_Zcode：uiautomator2 驱动，设备读 config/config.yaml（平台执行前自动改写注入台架）",
+        "base": "底座：uiautomator2 设备连接与基础操作封装",
+        "config": "config.yaml：设备 serial / u2_ip、被测包名、超时等",
+        "data": "测试数据：歌单 / 搜索关键词等",
+        "docs": "文档 + 用例覆盖矩阵.md（平台映射数据源：自动化用例 ↔ 官方 Excel 编号）",
+        "pages": "页面对象层（kuwo / iqiyi / ximalaya / leting）",
+        "testcase": "pytest 用例：按 test_01→02→03 文件序设计，用例间有状态依赖，勿乱序执行",
+        "utils": "工具：日志 / 截图 / 辅助函数",
+    },
+}
+
+
+def _zip_member_name(info: zipfile.ZipInfo) -> str:
+    """zip 成员名解码：无 UTF-8 标志位的中文名（Windows 压缩）按 cp437→GBK 还原。"""
+    if info.flag_bits & 0x800:
+        return info.filename
+    try:
+        return info.filename.encode("cp437").decode("gbk")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return info.filename
+
+
+def _decode_text(data: bytes) -> str:
+    """文本内容解码：优先 UTF-8，失败退 GBK（bat / 旧编辑器保存的文件）。"""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("gbk", errors="replace")
+
+
+def framework_preview(fw: str) -> dict:
+    """框架预览数据（fw = jdo | zcode | media）：文件清单 + 目录说明 + 下载指向。
+
+    - jdo：平台标准脚手架（framework/ 目录，打包下载）；
+    - zcode / media：该框架**最新上传的 zip**（id 最大），直接读 zip 建树、不解压。
+    找不到上传包时抛 ValueError（API 层转 404，前端在弹窗里提示）。
+    """
+    if fw not in _FW_KEYS:
+        return {"files": scaffold_manifest(), "dirs": SCAFFOLD_DIR_DESC,
+                "note": "同事下载后配合此包即可本地执行脚本（解压 → 装依赖 → 放脚本进 testcases → pytest）",
+                "download_url": "/api/scripts/scaffold", "download_label": "下载脚手架 zip",
+                "source": ""}
+    with closing(db.get_conn()) as conn:
+        row = conn.execute(
+            "SELECT id, name, file_path FROM scripts"
+            " WHERE framework = ? AND file_path IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (_FW_KEYS[fw],)).fetchone()
+    if not row or not str(row["file_path"]).lower().endswith(".zip") \
+            or not Path(row["file_path"]).exists():
+        raise ValueError("暂无该框架的上传包 —— 请先在脚本管理上传对应 zip")
+
+    desc_map = _FW_DIR_DESC.get(_FW_KEYS[fw], {})
+    files = []
+    with zipfile.ZipFile(row["file_path"]) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = _zip_member_name(info)
+            if any(p in _PREVIEW_SKIP_DIRS for p in name.split("/")[:-1]):
+                continue
+            is_text = Path(name).suffix.lower() in _TEXT_EXTS and info.file_size <= _PREVIEW_MAX
+            files.append({"path": name, "size": info.file_size, "text": is_text,
+                          "content": _decode_text(zf.read(info)) if is_text else ""})
+    files.sort(key=lambda f: f["path"])
+
+    # 目录说明：从文件路径归纳所有目录，按「目录名」查说明表（兼容包内有/无顶层包装目录）
+    all_dirs = set()
+    for f in files:
+        parts = f["path"].split("/")
+        for d in range(1, len(parts)):
+            all_dirs.add("/".join(parts[:d]))
+    dirs = {d: desc_map[d.split("/")[-1]] for d in all_dirs if d.split("/")[-1] in desc_map}
+
+    return {"files": files, "dirs": dirs, "note": desc_map.get("", ""),
+            "download_url": f"/api/scripts/{row['id']}/download",
+            "download_label": "下载原包 zip", "source": row["name"]}
 
 
 def list_scripts() -> list:

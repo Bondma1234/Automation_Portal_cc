@@ -66,10 +66,15 @@ async def upload(file: UploadFile = File(...), name: str = Form(...), app: str =
 
 
 @router.get("/scaffold/preview")
-def scaffold_preview():
-    """脚手架清单（下载前预览）：文件列表 + 各目录职责说明（前端渲染目录树）。"""
-    return {"files": script_service.scaffold_manifest(),
-            "dirs": script_service.SCAFFOLD_DIR_DESC}
+def scaffold_preview(fw: str = "jdo"):
+    """框架预览（fw = jdo | zcode | media）：文件树 + 目录职责说明 + 下载指向。
+
+    jdo 为平台标准脚手架；zcode / media 取该框架最新上传的 zip（未上传返回 404）。
+    """
+    try:
+        return script_service.framework_preview(fw)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/scaffold")

@@ -170,71 +170,112 @@ function escapeHtml(s) {
 }
 
 async function openScaffoldPreview() {
-  let files; let dirDescs;
-  try {
-    const res = await api.get('/api/scripts/scaffold/preview');
-    files = res.files;
-    dirDescs = res.dirs || {};
-  } catch (err) { toast(err.message); return; }
-
-  // ---- 目录树构建：目录带职责说明，文件缩进可点预览 ----
-  const childDirs = {};   // 父目录 -> 子目录列表
-  const childFiles = {};  // 目录 -> 文件下标列表
-  const allDirs = new Set();
-  files.forEach((f, i) => {
-    const parts = f.path.split('/');
-    for (let d = 1; d < parts.length; d++) allDirs.add(parts.slice(0, d).join('/'));
-    const dir = parts.slice(0, -1).join('/');
-    (childFiles[dir] = childFiles[dir] || []).push(i);
-  });
-  allDirs.forEach((d) => {
-    const parent = d.includes('/') ? d.split('/').slice(0, -1).join('/') : '';
-    (childDirs[parent] = childDirs[parent] || []).push(d);
-  });
-
-  let listHtml = '';
-  function walk(dir, depth) {
-    const desc = dirDescs[dir] || '';
-    listHtml += `<div style="padding:4px 6px 1px;margin-left:${depth * 12}px;">`
-      + `<div style="font-size:12px;color:var(--color-text-primary);font-weight:500;"><i class="ti ti-folder" style="vertical-align:-2px;color:var(--color-text-warning);" aria-hidden="true"></i> ${dir.split('/').pop()}/</div>`
-      + (desc ? `<div class="sub" style="font-size:10.5px;line-height:1.45;margin:1px 0 2px 17px;">${desc}</div>` : '')
-      + '</div>';
-    (childDirs[dir] || []).sort().forEach((d) => walk(d, depth + 1));
-    (childFiles[dir] || []).forEach((i) => {
-      const f = files[i];
-      listHtml += `<div class="scfItem" data-i="${i}" style="display:flex;justify-content:space-between;gap:8px;padding:3px 8px;margin-left:${(depth + 1) * 12}px;border-radius:6px;cursor:pointer;font-size:12px;"><span style="font-family:var(--font-mono);color:var(--color-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><i class="ti ti-file-code" style="vertical-align:-2px;color:var(--color-text-tertiary);" aria-hidden="true"></i> ${f.path.split('/').pop()}</span><span class="sub" style="flex-shrink:0;">${fmtSize(f.size)}</span></div>`;
-    });
-  }
-  walk('framework', 0);
-
-  const html = mdHead('框架脚手架 · 预览')
-    + `<div class="sub" style="margin-bottom:10px;">同事下载后配合此包即可本地执行脚本（解压 → 装依赖 → 放脚本进 testcases → pytest）。共 ${files.length} 个文件，点文件可预览内容。</div>`
-    + '<div style="display:flex;gap:12px;">'
-    + `<div style="width:47%;flex-shrink:0;max-height:340px;overflow:auto;border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:5px;">${listHtml}</div>`
-    + '<div style="flex:1;min-width:0;"><div id="scfName" class="sub" style="margin-bottom:5px;font-family:var(--font-mono);"></div><pre id="scfBody" style="margin:0;max-height:312px;overflow:auto;background:var(--color-background-tertiary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:10px 12px;font-family:var(--font-mono);font-size:11.5px;line-height:1.55;color:var(--color-text-primary);white-space:pre;"></pre></div>'
-    + '</div>'
-    + `<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;"><button id="mdCancel" class="gbtn">关闭</button><button id="scfDl" class="pbtn"><i class="ti ti-download" style="vertical-align:-2px;" aria-hidden="true"></i> 下载脚手架 zip</button></div>`;
+  // 三套框架均可预览：jdo=平台脚手架（打包 framework/），zcode/media=最新上传的原包（直读 zip）
+  const TABS = [['jdo', 'JDO 脚手架'], ['zcode', 'Zcode (u2)'], ['media', 'Media_automation']];
+  // 内容区固定高度：三个 tab 内容量不同，高度锁死才不会来回撑缩导致弹窗抖动
+  const html = mdHead('框架预览')
+    + `<div style="display:flex;gap:6px;margin-bottom:10px;">${TABS.map(([k, l]) => `<button class="gbtn scfTab" data-fw="${k}" style="font-size:12px;height:28px;padding:0 12px;">${l}</button>`).join('')}</div>`
+    + '<div id="scfWrap" style="height:412px;display:flex;flex-direction:column;"><div class="sub" style="padding:60px 0;text-align:center;">加载中…</div></div>'
+    + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;"><button id="mdCancel" class="gbtn">关闭</button><button id="scfDl" class="pbtn" style="visibility:hidden;"></button></div>';
   const ov = openModal(html, 620);
+  let dl = null;      // 当前 tab 的下载指向：jdo=脚手架 zip，其余=上传原包
+  let loadSeq = 0;    // 连点 tab 时只认最后一次请求的结果
 
-  function showFile(i) {
-    const f = files[i];
-    ov.querySelector('#scfName').textContent = f.path;
-    ov.querySelector('#scfBody').innerHTML = f.content
-      ? escapeHtml(f.content)
-      : `<span style="color:var(--color-text-tertiary);">${f.text ? '（空文件）' : '（二进制或超大文件，不预览内容）'}</span>`;
-    ov.querySelectorAll('.scfItem').forEach((el) => {
-      el.style.background = (+el.dataset.i === i) ? 'var(--color-background-info)' : '';
-    });
-  }
-  ov.querySelectorAll('.scfItem').forEach((el) => {
-    el.addEventListener('click', () => showFile(+el.dataset.i));
-  });
-  // 默认展示使用说明.md（找不到则第一个）
-  const defIdx = files.findIndex((f) => f.path.endsWith('使用说明.md'));
-  showFile(defIdx >= 0 ? defIdx : 0);
-
+  ov.querySelectorAll('.scfTab').forEach((b) => b.addEventListener('click', () => loadFw(b.dataset.fw)));
   ov.querySelector('#scfDl').addEventListener('click', () => {
-    api.download('/api/scripts/scaffold');
-    toast('框架脚手架.zip 已下载 · 解压后按使用说明操作');
+    if (dl) { api.download(dl.url); toast(`已开始下载 · ${dl.label}`); }
   });
+
+  async function loadFw(fw) {
+    ov.querySelectorAll('.scfTab').forEach((b) => {
+      const on = b.dataset.fw === fw;
+      b.style.background = on ? 'var(--color-background-info)' : '';
+      b.style.color = on ? 'var(--color-text-info)' : '';
+    });
+    const wrap = ov.querySelector('#scfWrap');
+    const dlBtn = ov.querySelector('#scfDl');
+    const seq = ++loadSeq;
+    let res;
+    try {
+      // 切换期间保留旧内容（本地接口很快），数据到了整体替换，避免「加载中」造成高度塌缩
+      res = await api.get(`/api/scripts/scaffold/preview?fw=${fw}`);
+    } catch (err) {   // 该框架尚无上传包（404）等：弹窗内提示，不打断
+      if (seq !== loadSeq) return;
+      wrap.innerHTML = `<div class="sub" style="padding:60px 0;text-align:center;">${err.message}</div>`;
+      dlBtn.style.visibility = 'hidden'; dl = null; return;
+    }
+    if (seq !== loadSeq) return;
+    dl = { url: res.download_url, label: res.download_label };
+    dlBtn.style.visibility = '';
+    dlBtn.innerHTML = `<i class="ti ti-download" style="vertical-align:-2px;" aria-hidden="true"></i> ${res.download_label}`;
+    renderTree(wrap, res);
+  }
+
+  // ---- 目录树构建：目录带职责说明，文件缩进可点预览（三套框架通用，支持多顶层目录/根文件） ----
+  function renderTree(wrap, res) {
+    const files = res.files;
+    const dirDescs = res.dirs || {};
+    const childDirs = {};   // 父目录 -> 子目录列表
+    const childFiles = {};  // 目录 -> 文件下标列表
+    const allDirs = new Set();
+    files.forEach((f, i) => {
+      const parts = f.path.split('/');
+      for (let d = 1; d < parts.length; d++) allDirs.add(parts.slice(0, d).join('/'));
+      const dir = parts.slice(0, -1).join('/');
+      (childFiles[dir] = childFiles[dir] || []).push(i);
+    });
+    allDirs.forEach((d) => {
+      const parent = d.includes('/') ? d.split('/').slice(0, -1).join('/') : '';
+      (childDirs[parent] = childDirs[parent] || []).push(d);
+    });
+
+    let listHtml = '';
+    const fileRow = (i, depth) => {
+      const f = files[i];
+      return `<div class="scfItem" data-i="${i}" style="display:flex;justify-content:space-between;gap:8px;padding:3px 8px;margin-left:${depth * 12}px;border-radius:6px;cursor:pointer;font-size:12px;"><span style="font-family:var(--font-mono);color:var(--color-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><i class="ti ti-file-code" style="vertical-align:-2px;color:var(--color-text-tertiary);" aria-hidden="true"></i> ${f.path.split('/').pop()}</span><span class="sub" style="flex-shrink:0;">${fmtSize(f.size)}</span></div>`;
+    };
+    function walk(dir, depth) {
+      const desc = dirDescs[dir] || '';
+      listHtml += `<div style="padding:4px 6px 1px;margin-left:${depth * 12}px;">`
+        + `<div style="font-size:12px;color:var(--color-text-primary);font-weight:500;"><i class="ti ti-folder" style="vertical-align:-2px;color:var(--color-text-warning);" aria-hidden="true"></i> ${dir.split('/').pop()}/</div>`
+        + (desc ? `<div class="sub" style="font-size:10.5px;line-height:1.45;margin:1px 0 2px 17px;">${desc}</div>` : '')
+        + '</div>';
+      (childDirs[dir] || []).sort().forEach((d) => walk(d, depth + 1));
+      (childFiles[dir] || []).forEach((i) => { listHtml += fileRow(i, depth + 1); });
+    }
+    (childDirs[''] || []).sort().forEach((d) => walk(d, 0));          // 顶层目录（jdo 只有 framework/）
+    (childFiles[''] || []).forEach((i) => { listHtml += fileRow(i, 0); });  // zip 根下的散文件
+
+    // 说明行固定预留两行高，树/预览用 flex 撑满剩余空间：各 tab 内容量不同但布局纹丝不动
+    wrap.innerHTML = `<div class="sub" style="margin-bottom:8px;flex-shrink:0;min-height:34px;">${res.note ? `${res.note}。` : ''}${res.source ? `来源：脚本「${res.source}」上传包 · ` : ''}共 ${files.length} 个文件，点文件可预览内容。</div>`
+      + '<div style="display:flex;gap:12px;flex:1;min-height:0;">'
+      + `<div style="width:47%;flex-shrink:0;overflow:auto;border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:5px;">${listHtml}</div>`
+      + '<div style="flex:1;min-width:0;display:flex;flex-direction:column;"><div id="scfName" class="sub" style="margin-bottom:5px;font-family:var(--font-mono);flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div><pre id="scfBody" style="margin:0;flex:1;overflow:auto;background:var(--color-background-tertiary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:10px 12px;font-family:var(--font-mono);font-size:11.5px;line-height:1.55;color:var(--color-text-primary);white-space:pre;"></pre></div>'
+      + '</div>';
+
+    function showFile(i) {
+      const f = files[i];
+      wrap.querySelector('#scfName').textContent = f.path;
+      wrap.querySelector('#scfBody').innerHTML = f.content
+        ? escapeHtml(f.content)
+        : `<span style="color:var(--color-text-tertiary);">${f.text ? '（空文件）' : '（二进制或超大文件，不预览内容）'}</span>`;
+      wrap.querySelectorAll('.scfItem').forEach((el) => {
+        el.style.background = (+el.dataset.i === i) ? 'var(--color-background-info)' : '';
+      });
+    }
+    wrap.querySelectorAll('.scfItem').forEach((el) => {
+      el.addEventListener('click', () => showFile(+el.dataset.i));
+    });
+    // 默认展示：使用说明 / README / 覆盖矩阵，都没有则第一个文本文件
+    const prefer = ['使用说明.md', 'readme.md', '覆盖矩阵'];
+    let defIdx = -1;
+    for (const key of prefer) {
+      defIdx = files.findIndex((f) => f.path.toLowerCase().split('/').pop().includes(key.toLowerCase()));
+      if (defIdx >= 0) break;
+    }
+    if (defIdx < 0) defIdx = Math.max(files.findIndex((f) => f.text), 0);
+    showFile(defIdx);
+  }
+
+  loadFw('jdo');
 }
