@@ -15,9 +15,22 @@ export async function render() {
   let body = '';
   scripts.forEach((s, i) => {
     const [rcls, rtxt] = RESULT_BADGE[s.last_result] || RESULT_BADGE.pending;
-    body += `<tr class="scrow hov" data-i="${i}" data-id="${s.id}" style="cursor:pointer;"><td style="font-weight:500;"><i class="ti ti-chevron-right scchev" data-i="${i}" style="vertical-align:-2px;color:var(--color-text-tertiary);transition:transform .15s;" aria-hidden="true"></i> ${s.name}</td><td class="sub">${s.app}</td><td>${s.cases.length} 条</td><td class="sub">${s.version}</td><td>${badge(rcls, rtxt)}</td><td style="text-align:right;white-space:nowrap;"><span class="lnk runbtn" data-id="${s.id}" data-name="${s.name}" title="在执行中心跑该脚本对应框架的用例" style="margin-right:12px;font-size:12.5px;">执行 ›</span><button class="iconbtn dlbtn" data-id="${s.id}" title="下载脚本到本地" aria-label="下载脚本"><i class="ti ti-download" aria-hidden="true"></i></button></td></tr>`;
-    // 展开行：本脚本覆盖的手工用例明细
-    const sub = `<div style="background:var(--color-background-tertiary);border-radius:var(--border-radius-md);padding:8px 12px;"><div class="sub" style="margin-bottom:4px;">本脚本覆盖 ${s.cases.length} 条手工用例：</div><table class="tbl"><thead><tr><th>用例编号</th><th>功能模块</th><th>优先级</th></tr></thead><tbody>${s.cases.map((c) => `<tr><td style="font-family:var(--font-mono);font-size:11.5px;">${c.case_id}</td><td>${c.module}</td><td>${c.priority}</td></tr>`).join('')}</tbody></table></div>`;
+    body += `<tr class="scrow hov" data-i="${i}" data-id="${s.id}" style="cursor:pointer;"><td style="font-weight:500;"><i class="ti ti-chevron-right scchev" data-i="${i}" style="vertical-align:-2px;color:var(--color-text-tertiary);transition:transform .15s;" aria-hidden="true"></i> ${s.name}</td><td class="sub">${s.app}</td><td>${s.cases.length} 条</td><td class="sub">${s.version}${s.versions.length > 1 ? ` <span style="font-size:10.5px;color:var(--color-text-tertiary);">(${s.versions.length}个版本)</span>` : ''}</td><td>${badge(rcls, rtxt)}</td><td style="text-align:right;white-space:nowrap;"><span class="lnk runbtn" data-id="${s.id}" data-name="${s.name}" title="在执行中心跑该脚本对应框架的用例" style="margin-right:12px;font-size:12.5px;">执行 ›</span><button class="iconbtn dlbtn" data-id="${s.id}" title="下载当前版本到本地" aria-label="下载脚本"><i class="ti ti-download" aria-hidden="true"></i></button></td></tr>`;
+
+    // 展开行①：版本列表（多版本共存；覆盖率/执行以「当前」版本为准。仓库脚本无版本记录不显示）
+    let verHtml = '';
+    if (s.versions.length) {
+      verHtml = `<div class="sub" style="margin-bottom:4px;">版本（${s.versions.length}）—— 覆盖率与执行以「当前」为准；重传同名同版本号可覆盖修复：</div>`
+        + `<table class="tbl" style="margin-bottom:10px;"><thead><tr><th>版本</th><th>上传时间</th><th>映射用例</th><th>状态</th><th style="text-align:right;">操作</th></tr></thead><tbody>`
+        + s.versions.map((v) => `<tr><td style="font-family:var(--font-mono);font-size:11.5px;">${v.version}</td><td class="sub">${v.created_at || '—'}</td><td>${v.case_count} 条</td><td>${v.active ? badge('b-ok', '当前') : ''}</td><td style="text-align:right;white-space:nowrap;">`
+          + (!v.active ? `<span class="lnk vact" data-sid="${s.id}" data-vid="${v.id}" data-ver="${v.version}" style="font-size:12px;margin-right:12px;">设为当前</span>` : '')
+          + (v.has_file ? `<span class="lnk vdl" data-sid="${s.id}" data-vid="${v.id}" style="font-size:12px;margin-right:12px;">下载</span>` : '')
+          + (s.versions.length > 1 ? `<span class="lnk vdel" data-sid="${s.id}" data-vid="${v.id}" data-ver="${v.version}" style="font-size:12px;color:var(--color-text-danger);">删除</span>` : '')
+          + '</td></tr>').join('')
+        + '</tbody></table>';
+    }
+    // 展开行②：当前版本覆盖的手工用例明细
+    const sub = `<div style="background:var(--color-background-tertiary);border-radius:var(--border-radius-md);padding:8px 12px;">${verHtml}<div class="sub" style="margin-bottom:4px;">当前版本覆盖 ${s.cases.length} 条手工用例：</div><table class="tbl"><thead><tr><th>用例编号</th><th>功能模块</th><th>优先级</th></tr></thead><tbody>${s.cases.map((c) => `<tr><td style="font-family:var(--font-mono);font-size:11.5px;">${c.case_id}</td><td>${c.module}</td><td>${c.priority}</td></tr>`).join('')}</tbody></table></div>`;
     body += `<tr class="scdet" data-i="${i}" style="display:none;"><td colspan="6" style="padding:4px 7px 10px;">${sub}</td></tr>`;
   });
 
@@ -60,69 +73,95 @@ export function init() {
       flash(b);
     });
   });
+  // 版本操作：设为当前 / 按版本下载 / 删除（展开区内，阻止冒泡防止行收起）
+  el.querySelectorAll('.vact').forEach((b) => {
+    b.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        await api.post(`/api/scripts/${b.dataset.sid}/versions/${b.dataset.vid}/activate`, {});
+        toast(`已切换到 ${b.dataset.ver} · 覆盖率与执行随之更新`);
+        go('scripts');
+      } catch (err) { toast(err.message); }
+    });
+  });
+  el.querySelectorAll('.vdl').forEach((b) => {
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      api.download(`/api/scripts/${b.dataset.sid}/versions/${b.dataset.vid}/download`);
+    });
+  });
+  el.querySelectorAll('.vdel').forEach((b) => {
+    b.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!window.confirm(`确定删除版本 ${b.dataset.ver}？该版本的文件与映射快照将被移除。`)) return;
+      try {
+        await api.del(`/api/scripts/${b.dataset.sid}/versions/${b.dataset.vid}`);
+        toast(`版本 ${b.dataset.ver} 已删除`);
+        go('scripts');
+      } catch (err) { toast(err.message); }
+    });
+  });
 }
 
-/* ---------------- 上传脚本弹窗（工作台快捷入口也会调用） ---------------- */
+/* ---------------- 上传脚本弹窗（工作台快捷入口也会调用） ----------------
+   映射全自动（标记/CSV/覆盖矩阵是唯一事实源，不再手工勾选）；
+   多版本语义：同名+新版本号=新增版本并激活，同名+旧版本号=覆盖修复该版本。 */
 export async function openUpload() {
-  // 关联用例数据源：全部手工用例按 App 分组（原型的 casesByApp）
-  const data = await api.get('/api/cases');
-  const byApp = {};
-  store.meta.apps.forEach((a) => { byApp[a] = []; });
-  data.rows.forEach((c) => { (byApp[c.app] = byApp[c.app] || []).push(c); });
-  const apps = Object.keys(byApp);
+  const scripts = await api.get('/api/scripts');   // 重名/版本冲突检测数据源
+  const apps = store.meta.apps;
 
   const html = mdHead('上传自动化脚本')
     + '<div class="mdlab">脚本文件 (.py / .zip)</div>'
     + '<label style="display:flex;flex-direction:column;align-items:center;gap:5px;border:1px dashed var(--color-border-secondary);border-radius:var(--border-radius-md);padding:14px;cursor:pointer;color:var(--color-text-secondary);background:var(--color-background-tertiary);margin:5px 0 13px;"><i class="ti ti-cloud-upload" style="font-size:21px;" aria-hidden="true"></i><span id="mdFn" style="font-size:12px;">点击选择文件…</span><input id="mdFile" type="file" accept=".py,.zip" style="display:none;"></label>'
     + '<div class="mdlab">脚本名称</div><input id="mdName" type="text" placeholder="如 酷我音乐 · 播放回归" style="width:100%;margin:5px 0 13px;">'
     + `<div style="display:flex;gap:10px;"><div style="flex:1;min-width:0;"><div class="mdlab">关联 App</div><select id="mdApp" style="width:100%;margin:5px 0 13px;">${apps.map((a) => `<option>${a}</option>`).join('')}</select></div><div style="width:92px;"><div class="mdlab">版本</div><input id="mdVer" type="text" value="v1.0" style="width:100%;margin:5px 0 13px;"></div></div>`
-    + '<div class="mdlab" style="margin-bottom:5px;">关联手工用例 <span id="mdCnt" style="color:var(--color-text-info);"></span></div>'
-    + '<div style="display:flex;gap:8px;margin-bottom:6px;"><span id="mdAll" class="lnk" style="font-size:11px;">全选</span><span id="mdNone" class="lnk" style="font-size:11px;">清空</span></div>'
-    + '<div id="mdCases" style="border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:8px 11px;margin-bottom:15px;"></div>'
+    + '<div id="mdConflict" class="sub" style="display:none;margin:-6px 0 10px;font-size:11.5px;line-height:1.5;"></div>'
+    + '<div class="mdlab" style="margin-bottom:5px;">映射识别（自动，无需勾选）</div>'
+    + '<div id="mdSum" class="sub" style="border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:8px 11px;margin-bottom:15px;font-size:12px;line-height:1.6;">选择文件后自动识别框架与用例映射：Zcode/Media 包按包内映射表，其余按 <code>@pytest.mark.case</code> 标记。</div>'
     + `<div style="display:flex;justify-content:flex-end;gap:8px;"><button id="mdCancel" class="gbtn">取消</button><button id="mdOk" class="pbtn"><i class="ti ti-upload" style="vertical-align:-2px;" aria-hidden="true"></i> 确定上传</button></div>`;
   const ov = openModal(html);
   let pickedFile = null;
-  let scannedIds = [];   // 从脚本文件里扫出的 @pytest.mark.case 编号（自动勾选依据）
 
-  // 切换 App 时重画该 App 的用例勾选列表（已扫描到的编号保持自动勾选）
-  function renderCases() {
-    const app = ov.querySelector('#mdApp').value;
-    const list = byApp[app] || [];
-    ov.querySelector('#mdCases').innerHTML = list.length
-      ? list.map((c) => `<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--color-text-primary);padding:3px 0;"><input type="checkbox" class="mdc" value="${c.id}" data-m="${c.module}" data-p="${c.priority}"${scannedIds.includes(c.id) ? ' checked' : ''}> <span style="font-family:var(--font-mono);font-size:11px;">${c.id}</span> <span class="sub">${c.module} · ${c.priority}</span></label>`).join('')
-      : '<div class="sub" style="padding:4px 0;">该 App 暂无手工用例，请先到「测试用例」录入</div>';
-    ov.querySelectorAll('.mdc').forEach((c) => c.addEventListener('change', updateCount));
-    updateCount();
-  }
+  const FW_LABEL = { media_zcode: 'Zcode(u2) 包', media_automation: 'Media_automation 包', jdo: 'JDO 规范脚本' };
 
-  // 扫描文件内的用例标记并自动勾选（标记即映射表，无需手工比对）
-  async function scanAndCheck(file) {
+  // 选完文件 → 只读识别摘要（框架类型 + 映射命中统计 + 未命中编号明示）
+  async function scanSummary(file) {
+    const box = ov.querySelector('#mdSum');
+    box.innerHTML = '识别中…';
     const fd = new FormData();
     fd.append('file', file);
     try {
-      const res = await api.postForm('/api/scripts/scan', fd);
-      scannedIds = res.cases;
-      if (!scannedIds.length) { toast('文件中未识别到 @pytest.mark.case 标记，请手动勾选'); return; }
-      let matched = 0;
-      ov.querySelectorAll('.mdc').forEach((c) => {
-        if (scannedIds.includes(c.value)) { c.checked = true; matched++; }
-      });
-      updateCount();
-      const unmatched = scannedIds.length - matched;
-      toast(`已识别 ${scannedIds.length} 条用例标记，自动勾选 ${matched} 条`
-        + (unmatched ? `（${unmatched} 条不在当前 App 用例库）` : ''));
-    } catch (err) { toast(err.message); }
-  }
-  function updateCount() {
-    const n = ov.querySelectorAll('.mdc:checked').length;
-    ov.querySelector('#mdCnt').textContent = n ? `已选 ${n} 条` : '';
+      const r = await api.postForm('/api/scripts/scan', fd);
+      if (!r.framework) {
+        box.innerHTML = '<span style="color:var(--color-text-warning);">未识别到框架特征或用例标记 —— 可以上传，但不会计入覆盖率。</span>请按 doc/脚本框架规范 打 <code>@pytest.mark.case</code> 标记。';
+        return;
+      }
+      let h = `<span style="color:var(--color-text-info);">识别为 ${FW_LABEL[r.framework] || r.framework}</span> · 命中官方用例库 <b>${r.matched}</b> 条`
+        + (r.unmatched ? ` · <span style="color:var(--color-text-warning);">${r.unmatched} 条未命中</span>` : '');
+      if (r.unmatched_ids && r.unmatched_ids.length) {
+        h += `<div style="margin-top:3px;color:var(--color-text-warning);">未命中编号（请改为官方 KW-000x 体系）：${r.unmatched_ids.slice(0, 8).join('、')}${r.unmatched_ids.length > 8 ? ' …' : ''}</div>`;
+      }
+      box.innerHTML = h;
+    } catch (err) { box.innerHTML = `<span style="color:var(--color-text-danger);">${err.message}</span>`; }
   }
 
-  ov.querySelector('#mdApp').addEventListener('change', renderCases);
-  ov.querySelector('#mdAll').addEventListener('click', () => { ov.querySelectorAll('.mdc').forEach((c) => { c.checked = true; }); updateCount(); });
-  ov.querySelector('#mdNone').addEventListener('click', () => { ov.querySelectorAll('.mdc').forEach((c) => { c.checked = false; }); updateCount(); });
+  // 名称/版本变化 → 重名与版本冲突提示（新版本号=新增版本，旧版本号=覆盖修复）
+  function refreshConflict() {
+    const tip = ov.querySelector('#mdConflict');
+    const name = ov.querySelector('#mdName').value.trim();
+    const ver = ov.querySelector('#mdVer').value.trim();
+    const hit = scripts.find((s) => s.name === name && s.versions && s.versions.length);
+    if (!hit) { tip.style.display = 'none'; return; }
+    tip.style.display = '';
+    const exists = hit.versions.find((v) => v.version === ver);
+    tip.innerHTML = exists
+      ? `<span style="color:var(--color-text-danger);">⚠ 已有脚本「${hit.name}」存在版本 ${ver} —— 上传将<b>覆盖</b>该版本的文件与映射${exists.active ? '（它是当前版本，覆盖率随之更新）' : ''}。</span>`
+      : `<span style="color:var(--color-text-info);">已有脚本「${hit.name}」（${hit.versions.length} 个版本，当前 ${hit.version}）—— 将<b>新增版本 ${ver || '?'}</b> 并设为当前。</span>`;
+  }
+  ov.querySelector('#mdName').addEventListener('input', refreshConflict);
+  ov.querySelector('#mdVer').addEventListener('input', refreshConflict);
 
-  // 选文件后：大小校验 → 显示文件名 → 自动填脚本名 → 扫描标记自动勾选
+  // 选文件后：大小校验 → 显示文件名 → 自动填脚本名 → 识别摘要
   ov.querySelector('#mdFile').addEventListener('change', (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
@@ -131,32 +170,28 @@ export async function openUpload() {
     ov.querySelector('#mdFn').textContent = f.name;
     const nameInput = ov.querySelector('#mdName');
     if (!nameInput.value) nameInput.value = f.name.replace(/\.(py|zip)$/i, '').replace(/_/g, ' ');
-    scanAndCheck(f);
+    refreshConflict();
+    scanSummary(f);
   });
 
   ov.querySelector('#mdOk').addEventListener('click', async () => {
     const name = ov.querySelector('#mdName').value.trim();
-    const app = ov.querySelector('#mdApp').value;
-    const ver = ov.querySelector('#mdVer').value.trim() || 'v1.0';
-    const picked = Array.from(ov.querySelectorAll('.mdc:checked')).map((c) => [c.value, c.dataset.m, c.dataset.p]);
     if (!name) { toast('请填写脚本名称'); return; }
-    if (!picked.length) { toast('请至少关联 1 条手工用例'); return; }
-    if (!pickedFile) { toast('请选择脚本文件 (.py / .zip)'); return; }   // 真实上传必须有文件
+    if (!pickedFile) { toast('请选择脚本文件 (.py / .zip)'); return; }
     const fd = new FormData();
     fd.append('file', pickedFile);
     fd.append('name', name);
-    fd.append('app', app);
-    fd.append('version', ver);
-    fd.append('cases', JSON.stringify(picked));
+    fd.append('app', ov.querySelector('#mdApp').value);
+    fd.append('version', ov.querySelector('#mdVer').value.trim() || 'v1.0');
+    const okBtn = ov.querySelector('#mdOk');
+    okBtn.disabled = true;
     try {
-      await api.postForm('/api/scripts/upload', fd);
+      const r = await api.postForm('/api/scripts/upload', fd);
       ov.remove();
       go('scripts');
-      toast(`脚本「${name}」已上传 · 关联 ${picked.length} 条用例`);
-    } catch (err) { toast(err.message); }
+      toast(r.message || `脚本「${name}」已上传`);
+    } catch (err) { toast(err.message); okBtn.disabled = false; }
   });
-
-  renderCases();
 }
 
 /* ---------------- 框架脚手架预览弹窗（先看内容，再决定下载） ---------------- */

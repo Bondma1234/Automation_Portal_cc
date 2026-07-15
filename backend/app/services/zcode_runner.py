@@ -135,11 +135,19 @@ def _inject_device(bundle_dir: Path, serial: str):
 
 def run_brand(job: dict, rows: list, brand: str, bi: int, serial: str,
               bundle_dir: Path, mark, add_log):
-    """真机跑该品牌整列：改写 config.yaml 注入台架 → 组装命令 → 委托 runner_common。"""
+    """真机跑该品牌整列：复制 run 专属工作目录并注入台架 → 组装命令 → 委托 runner_common。
+
+    Zcode 的设备注入是**改写包内 config.yaml**（文件级），多品牌/多 job 并发时共用
+    缓存目录会互相覆盖注入 → 每次执行复制一份 run 专属目录（源码包很小，秒级），跑完即删。
+    """
+    import shutil
     import sys
 
-    _inject_device(bundle_dir, serial)
-    node_rows = _build_node_rows(bundle_dir, rows)
+    node_rows = _build_node_rows(bundle_dir, rows)     # 映射/收集用共享缓存目录（只读）
+
+    workdir = bundle_dir.parent / f"run_{job['id']}_{bi}_zcode"
+    shutil.copytree(bundle_dir, workdir, dirs_exist_ok=True)
+    _inject_device(workdir, serial)
 
     progress_file = config.PROGRESS_DIR / f"{job['id']}_{bi}_zcode.jsonl"
     allure_dir = config.PROGRESS_DIR / f"allure_{job['id']}_{bi}"
@@ -151,6 +159,9 @@ def run_brand(job: dict, rows: list, brand: str, bi: int, serial: str,
            "-o", "addopts=", "-p", "no:cacheprovider",
            "-p", runner_common.PLUGIN_FILENAME[:-3], "--alluredir", str(allure_dir)]
 
-    add_log(f"› {brand}台架 真机执行 Zcode(u2) · {len(node_rows)} 个测试覆盖 {len(rows)} 条用例")
-    runner_common.track_pytest(job, rows, brand, bi, bundle_dir, node_rows, cmd, env,
-                               mark, add_log, "zcode")
+    add_log(f"› {brand}台架({serial}) 真机执行 Zcode(u2) · {len(node_rows)} 个测试覆盖 {len(rows)} 条用例")
+    try:
+        runner_common.track_pytest(job, rows, brand, bi, workdir, node_rows, cmd, env,
+                                   mark, add_log, "zcode")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)     # run 专属目录用完即删

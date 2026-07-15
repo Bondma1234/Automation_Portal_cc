@@ -4,6 +4,7 @@
 文件内的 @pytest.mark.case 标记自动勾选 —— 标记即映射表，无需额外 manifest。
 """
 import io
+import json
 import re
 import time
 import zipfile
@@ -232,13 +233,21 @@ def framework_preview(fw: str) -> dict:
 
 
 def list_scripts() -> list:
-    """脚本列表 + 每个脚本覆盖的用例快照（行展开明细用）。新上传的排最前。"""
+    """脚本列表 + 激活版本的用例映射 + 版本清单（行展开明细/版本管理用）。新上传的排最前。"""
     with closing(db.get_conn()) as conn:
         scripts = [dict(r) for r in conn.execute("SELECT * FROM scripts ORDER BY id DESC")]
         for s in scripts:
             s["cases"] = [dict(r) for r in conn.execute(
                 "SELECT case_id, module, priority FROM script_case WHERE script_id = ? ORDER BY rowid",
                 (s["id"],))]
+            # 版本清单（新→旧）；仓库脚本无版本记录 → 空列表，前端不显示版本区
+            s["versions"] = [{
+                "id": v["id"], "version": v["version"],
+                "case_count": len(json.loads(v["cases_json"] or "[]")),
+                "created_at": v["created_at"], "has_file": bool(v["file_path"]),
+                "active": v["id"] == s["active_version_id"],
+            } for v in conn.execute(
+                "SELECT * FROM script_versions WHERE script_id = ? ORDER BY id DESC", (s["id"],))]
     return scripts
 
 
@@ -253,26 +262,146 @@ def save_upload(filename: str, content: bytes):
     return saved
 
 
-def upload(filename: str, content: bytes, name: str, app: str, version: str,
-           case_ids: list, case_meta: dict) -> dict:
-    """保存脚本原件并按勾选建立用例映射（我们 framework 的标准上传路径）。
+# ---------------------------------------------------------------- 多版本管理
+# 语义：一个脚本名一条 scripts 记录（本体），版本存 script_versions（各自独立文件+映射快照）。
+# 覆盖率与执行永远跟着「激活版本」走：script_case 始终 = 激活版本的映射，
+# 激活切换 / 覆盖激活版本时整体重建，其余版本只动自己的快照。
 
-    - case_ids 为前端勾选/自动识别的用例编号；
-    - case_meta: {case_id: (module, priority)} 勾选用例的快照信息。
+def _rebuild_mapping(conn, sid: int, cases: list):
+    """script_case（覆盖率唯一收口）重建为给定映射快照。cases=[[case_id,module,priority],...]"""
+    conn.execute("DELETE FROM script_case WHERE script_id = ?", (sid,))
+    conn.executemany(
+        "INSERT OR IGNORE INTO script_case(script_id,case_id,module,priority) VALUES(?,?,?,?)",
+        [(sid, c[0], c[1], c[2]) for c in cases])
+
+
+def _apply_version(conn, sid: int, v: dict):
+    """把某版本设为脚本的激活版本：回写本体字段 + 重建映射。"""
+    conn.execute(
+        "UPDATE scripts SET version=?, framework=?, file_name=?, file_path=?, active_version_id=?"
+        " WHERE id=?",
+        (v["version"], v["framework"], v["file_name"], v["file_path"], v["id"], sid))
+    _rebuild_mapping(conn, sid, json.loads(v["cases_json"] or "[]"))
+
+
+def save_version(name: str, app: str, version: str, framework: str,
+                 filename: str, content: bytes, cases: list) -> dict:
+    """多版本上传统一入口（三条框架识别路径都走这里）。
+
+    - 名称不存在        → 新建脚本 + 该版本，激活；
+    - 名称已有+新版本号 → 新增版本，激活（覆盖率跟到新版本）；
+    - 名称已有+旧版本号 → **覆盖**该版本的文件与映射快照（修复旧版本），
+      仅当被覆盖的正是激活版本时才重建 script_case，其余版本互不影响。
+    cases: [[case_id, module, priority], ...]（各框架适配器解析好的映射快照）。
     """
-    saved = save_upload(filename, content)
+    saved = save_upload(filename, content)          # 时间戳前缀，每次都是新文件（旧版本文件保留）
+    snapshot = json.dumps(cases, ensure_ascii=False)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with closing(db.get_conn()) as conn:
-        cur = conn.execute(
-            "INSERT INTO scripts(name,app,version,framework,file_name,file_path,last_result,created_at)"
-            " VALUES(?,?,?,?,?,?,'pending',?)",
-            (name, app, version, config.FRAMEWORK_JDO, Path(filename).name, str(saved),
-             datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        sid = cur.lastrowid
-        conn.executemany(
-            "INSERT OR IGNORE INTO script_case(script_id,case_id,module,priority) VALUES(?,?,?,?)",
-            [(sid, cid, *case_meta.get(cid, ("", ""))) for cid in case_ids])
+        # 仓库脚本（version='仓库'）由 scanner 全权管理，重名不与其合并
+        s = conn.execute("SELECT * FROM scripts WHERE name = ? AND version != '仓库'",
+                         (name,)).fetchone()
+        if not s:
+            sid = conn.execute(
+                "INSERT INTO scripts(name,app,version,framework,file_name,file_path,last_result,created_at)"
+                " VALUES(?,?,?,?,?,?,'pending',?)",
+                (name, app, version, framework, Path(filename).name, str(saved), ts)).lastrowid
+            action = "created"
+        else:
+            sid = s["id"]
+            conn.execute("UPDATE scripts SET app = ? WHERE id = ?", (app, sid))
+            action = None                            # 下面按版本号判定 new_version / overwritten
+
+        old = conn.execute(
+            "SELECT id FROM script_versions WHERE script_id = ? AND version = ?",
+            (sid, version)).fetchone()
+        if old:                                      # 覆盖已有版本（修复）
+            conn.execute(
+                "UPDATE script_versions SET framework=?, file_name=?, file_path=?, cases_json=?,"
+                " created_at=? WHERE id=?",
+                (framework, Path(filename).name, str(saved), snapshot, ts, old["id"]))
+            vid, action = old["id"], action or "overwritten"
+        else:                                        # 新版本
+            vid = conn.execute(
+                "INSERT INTO script_versions(script_id,version,framework,file_name,file_path,"
+                "cases_json,created_at) VALUES(?,?,?,?,?,?,?)",
+                (sid, version, framework, Path(filename).name, str(saved), snapshot, ts)).lastrowid
+            action = action or "new_version"
+
+        # 激活规则：新建/新版本必激活；覆盖的恰是激活版本 → 同步刷新本体与映射
+        activated = action in ("created", "new_version") or (s and s["active_version_id"] == vid)
+        if activated:
+            v = dict(conn.execute("SELECT * FROM script_versions WHERE id = ?", (vid,)).fetchone())
+            _apply_version(conn, sid, v)
         conn.commit()
-    return {"id": sid, "saved": saved.name, "cases": len(case_ids)}
+    return {"id": sid, "version_id": vid, "action": action,
+            "activated": bool(activated), "cases": len(cases)}
+
+
+def snapshot_from_marks(filename: str, content: bytes) -> tuple:
+    """jdo 路径的映射快照：扫描文件内 @pytest.mark.case 标记 → 命中官方库的建快照。
+
+    返回 (cases 快照, matched 编号列表, unmatched 编号列表)。未命中的如实返回给前端提示
+    （倒逼把老格式标记改成官方编号），不静默丢弃也不允许手工乱勾。
+    """
+    marks = scan_case_marks(filename, content)
+    if not marks:
+        return [], [], []
+    ph = ",".join("?" * len(marks))
+    with closing(db.get_conn()) as conn:
+        meta = {r["id"]: (r["module"], r["priority"]) for r in conn.execute(
+            f"SELECT id, module, priority FROM cases WHERE id IN ({ph})", marks)}
+    matched = [m for m in marks if m in meta]
+    return ([[m, *meta[m]] for m in matched], matched,
+            [m for m in marks if m not in meta])
+
+
+def activate_version(script_id: int, version_id: int):
+    """把指定版本设为当前（覆盖率/执行随之切换）。"""
+    with closing(db.get_conn()) as conn:
+        v = conn.execute("SELECT * FROM script_versions WHERE id = ? AND script_id = ?",
+                         (version_id, script_id)).fetchone()
+        if not v:
+            raise ValueError("版本不存在")
+        _apply_version(conn, script_id, dict(v))
+        conn.commit()
+
+
+def delete_version(script_id: int, version_id: int):
+    """删除某版本；至少保留一个。删的是激活版本时自动激活剩余最新版。"""
+    with closing(db.get_conn()) as conn:
+        versions = [dict(r) for r in conn.execute(
+            "SELECT * FROM script_versions WHERE script_id = ? ORDER BY id DESC", (script_id,))]
+        target = next((v for v in versions if v["id"] == version_id), None)
+        if not target:
+            raise ValueError("版本不存在")
+        if len(versions) <= 1:
+            raise ValueError("至少保留一个版本；如需移除脚本请联系平台组")
+        conn.execute("DELETE FROM script_versions WHERE id = ?", (version_id,))
+        active = conn.execute("SELECT active_version_id FROM scripts WHERE id = ?",
+                              (script_id,)).fetchone()[0]
+        if active == version_id:                     # 删了当前版本 → 激活剩余最新版
+            nxt = next(v for v in versions if v["id"] != version_id)
+            _apply_version(conn, script_id, nxt)
+        conn.commit()
+    # 清理该版本独占的上传原件（仅限 uploads 目录内，且无其它版本引用同一文件）
+    fp = target.get("file_path")
+    if fp and Path(fp).exists() and Path(fp).parent == config.UPLOAD_DIR:
+        with closing(db.get_conn()) as conn:
+            still = conn.execute("SELECT 1 FROM script_versions WHERE file_path = ? LIMIT 1",
+                                 (fp,)).fetchone()
+        if not still:
+            Path(fp).unlink(missing_ok=True)
+
+
+def get_version_download(script_id: int, version_id: int):
+    """按版本下载原件：返回 (path, filename)，无文件返回 None。"""
+    with closing(db.get_conn()) as conn:
+        v = conn.execute("SELECT * FROM script_versions WHERE id = ? AND script_id = ?",
+                         (version_id, script_id)).fetchone()
+    if not v or not v["file_path"] or not Path(v["file_path"]).exists():
+        return None
+    return v["file_path"], v["file_name"] or Path(v["file_path"]).name
 
 
 def _make_seed_stub(script: dict, cases: list) -> str:

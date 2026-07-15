@@ -50,16 +50,23 @@ MANUAL_MINUTES_PER_CASE = 10
 WORK_MINUTES_PER_DAY = 480
 
 # ---------- 真机执行 ----------
-# 品牌 → 台架序列号：执行时该品牌若 adb 可达则真跑 pytest，否则自动回退模拟演示。
-# .32 = 许可有效的 Audi 台架（2026-07-06 三条酷我用例真机 PASSED）；
-# .89 = P0 主台架，媒体中心许可证过期待续期，续期后可加回。
+# 真机台架由 devices 表驱动（brand → 台架池，udid 即 adb serial；「设备管理→接入台架」维护）。
+# 旧 REAL_DEVICE_MAP 硬编码已废弃 —— 单一事实源收口数据库，接新台架无需改代码。
+# 执行时该品牌池内若有可达且空闲的台架则真跑 pytest；无台架回退模拟；有台架但全被占用则拒绝启动。
 # ⚠ 此固件用 SELinux 包策略拦截自动化端口(9008等)，adbd 必须为 root（探测时自动 adb root）。
-REAL_DEVICE_MAP = {
-    "奥迪": "192.168.2.32:5555",
-}
 PROGRESS_DIR = DATA_DIR / "progress"     # 真机执行的进度 jsonl（框架 conftest 回写）
 COLLECT_TIMEOUT = 60                     # 预收集（--collect-only）超时（秒）
-REAL_RUN_TIMEOUT = 600                   # 单品牌 pytest 会话超时（秒）
+REAL_RUN_TIMEOUT = 600                   # 单品牌 pytest 会话超时下限（秒）
+REAL_RUN_PER_TEST = 120                  # 每测试超时预算（media ADB-XML 慢，按量给时）
+REAL_RUN_MAX = 3600                      # 单品牌会话超时上限：max(下限, 测试数×预算) 后封顶
+
+# ---------- 环境预检（真机列执行前，借鉴 Codex 平台设计） ----------
+# 被测 App 前台检查的目标：三套框架的被测对象都是 One Info 酷我模块
+PREFLIGHT_APP = {"package": "com.jidouauto.media",
+                 "component": "com.jidouauto.media/.ui.kuwo.main.KuwoMainActivity",
+                 "action": "com.jidouauto.media.kuwo.LAUNCH_INTENT"}
+# 前台等待预算：台架劣化时酷我冷启动实测可达 45s+（2026-07-13），给足 90s 免误判
+PREFLIGHT_FOREGROUND_TIMEOUT = 90
 
 # ---------- Allure 报告 ----------
 # 真机执行：pytest --alluredir 产出结果；模拟/种子报告：点击时按报告明细合成结果 JSON。

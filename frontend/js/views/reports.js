@@ -16,7 +16,7 @@ export async function render() {
 
   const appOpts = opt('全部 App', f.app) + store.meta.apps.map((a) => opt(a, f.app)).join('');
   const brOpts = opt('全部品牌', f.brand) + store.meta.brands.map((b) => opt(b, f.brand)).join('');
-  const stOpts = ['全部状态', '通过', '失败'].map((v) => opt(v, f.status)).join('');
+  const stOpts = ['全部状态', '通过', '失败', '终止'].map((v) => opt(v, f.status)).join('');
 
   // 筛选控件统一样式：与测试用例一致（34px 高 / 13px 字），协调美观
   const ctl = 'height:34px;font-size:13px;padding:0 10px;border-radius:var(--border-radius-md);';
@@ -26,7 +26,7 @@ export async function render() {
 
   let body = reports.length ? '' : '<tr><td colspan="8" class="sub" style="text-align:center;padding:18px;">无匹配报告</td></tr>';
   reports.forEach((r, i) => {
-    body += `<tr class="rprow hov" data-i="${i}" style="cursor:pointer;"><td>#${r.id}</td><td>${r.task}</td><td>${r.brand}</td><td>${r.pass}/${r.total}</td><td class="sub">${r.dur}</td><td>${r.status === '通过' ? badge('b-ok', '通过') : badge('b-fail', '失败')}</td><td class="sub">${r.time.slice(5)}</td><td style="text-align:right;"><button class="iconbtn alBtn" data-id="${r.id}" title="打开 Allure" aria-label="打开 Allure" style="width:auto;padding:0 8px;gap:4px;"><i class="ti ti-external-link" aria-hidden="true"></i> Allure</button></td></tr>`;
+    body += `<tr class="rprow hov" data-i="${i}" style="cursor:pointer;"><td>#${r.id}</td><td>${r.task}</td><td>${r.brand}</td><td>${r.pass}/${r.total}</td><td class="sub">${r.dur}</td><td>${r.status === '通过' ? badge('b-ok', '通过') : (r.status === '终止' ? badge('b-mut', '终止') : badge('b-fail', '失败'))}</td><td class="sub">${r.time.slice(5)}</td><td style="text-align:right;"><button class="iconbtn alBtn" data-id="${r.id}" title="打开 Allure" aria-label="打开 Allure" style="width:auto;padding:0 8px;gap:4px;"><i class="ti ti-external-link" aria-hidden="true"></i> Allure</button></td></tr>`;
     body += `<tr class="rpdet" data-i="${i}" style="display:none;"><td colspan="8" style="padding:4px 7px 10px;">${detail(r)}</td></tr>`;
   });
 
@@ -45,7 +45,9 @@ function detail(r) {
     + `<button class="iconbtn alBtn" data-id="${r.id}" style="width:auto;padding:0 10px;gap:4px;margin-left:auto;border-color:var(--color-border-info);color:var(--color-text-info);"><i class="ti ti-external-link" aria-hidden="true"></i> 打开 Allure</button></div>`;
 
   const rows = r.cases.map((c) => {
-    let line = `<tr><td style="font-family:var(--font-mono);font-size:11px;">${c.case_id}</td><td>${c.name}</td><td>${c.result === 'ok' ? badge('b-ok', '通过') : badge('b-fail', '失败')}</td></tr>`;
+    const resBadge = c.result === 'ok' ? badge('b-ok', '通过')
+      : (c.result === 'na' ? badge('b-mut', '未执行') : badge('b-fail', '失败'));
+    let line = `<tr><td style="font-family:var(--font-mono);font-size:11px;">${c.case_id}</td><td>${c.name}</td><td>${resBadge}</td></tr>`;
     if (c.result === 'fail') {
       // 失败现场三件套占位（截图/录屏/logcat），接 Allure 后替换为真实附件
       line += '<tr><td colspan="3" style="padding:0 7px 8px;"><div style="background:var(--color-background-tertiary);border-radius:6px;padding:8px 11px;font-family:var(--font-mono);font-size:11px;line-height:1.7;color:var(--color-text-secondary);">› 校验 media_session 状态 … 期望 PLAYING，实际 PAUSED ✗<br><span style="color:var(--color-text-danger);">AssertionError: 播放未生效（疑似登录态失效）</span><div style="display:flex;gap:8px;margin-top:8px;"><div style="width:84px;height:50px;background:var(--color-background-secondary);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--color-text-tertiary);"><i class="ti ti-photo" aria-hidden="true"></i></div><div style="width:84px;height:50px;background:var(--color-background-secondary);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--color-text-tertiary);"><i class="ti ti-video" aria-hidden="true"></i></div><div style="width:84px;height:50px;background:var(--color-background-secondary);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--color-text-tertiary);"><i class="ti ti-file-text" aria-hidden="true"></i></div></div></div></td></tr>';

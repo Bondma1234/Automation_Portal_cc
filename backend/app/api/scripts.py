@@ -1,10 +1,10 @@
-"""脚本管理接口：列表 / 上传 / 标记扫描 / 下载 / 框架脚手架。"""
-import json
+"""脚本管理接口：列表 / 上传（多版本）/ 识别扫描 / 版本管理 / 下载 / 框架预览。"""
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 
+from .. import config
 from ..models import RunScriptBody
 from ..services import official_service, run_service, script_service
 
@@ -18,51 +18,90 @@ def list_scripts():
 
 @router.post("/scan")
 async def scan(file: UploadFile = File(...)):
-    """只读扫描 .py/.zip 内的 @pytest.mark.case 标记（上传弹窗选完文件后自动勾选用）。"""
+    """上传弹窗选完文件后的只读识别摘要：框架类型 + 映射/标记命中统计，不落盘。"""
+    filename = file.filename or ""
     content = await file.read()
     try:
         script_service.check_size(content)
-        return {"cases": script_service.scan_case_marks(file.filename or "", content)}
+        if filename.lower().endswith(".zip"):
+            found = official_service.inspect_zip(content)
+            if found:                              # Zcode / Media 包：映射来自包内 CSV/矩阵
+                return {**found, "cases": [], "unmatched_ids": []}
+        # jdo 路径：扫描 @pytest.mark.case 标记并与官方库比对
+        _, matched, unmatched = script_service.snapshot_from_marks(filename, content)
+        return {"framework": "jdo" if (matched or unmatched) else "",
+                "matched": len(matched), "unmatched": len(unmatched),
+                "cases": matched, "unmatched_ids": unmatched}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# 上传结果 → 前端提示文案（多版本语义）
+_ACTION_TEXT = {"created": "已创建脚本", "new_version": "已新增版本并设为当前",
+                "overwritten": "已覆盖该版本"}
 
 
 @router.post("/upload")
 async def upload(file: UploadFile = File(...), name: str = Form(...), app: str = Form(...),
-                 version: str = Form("v1.0"), cases: str = Form("[]")):
-    """cases 为 JSON 数组：[[case_id, module, priority], ...]（前端勾选结果，与原型一致）。
+                 version: str = Form("v1.0")):
+    """上传即自动映射（不再手工勾选用例）+ 多版本落库：
 
-    自动识别框架来源：若为 Media_automation 包（含映射 CSV），走适配器按 CSV 映射覆盖率；
-    否则走标准路径（按勾选建映射）。前端无需区分。
+    同名脚本：新版本号=新增版本并激活；已有版本号=覆盖修复该版本。
+    框架自动识别：Zcode / Media_automation 按包内映射，其余按 @pytest.mark.case 标记。
     """
     filename = file.filename or "script.py"
     content = await file.read()
+    sname, ver = name.strip() or filename, version.strip() or "v1.0"
     try:
         script_service.check_size(content)
         is_zip = filename.lower().endswith(".zip")
         if is_zip and official_service.is_zcode_bundle(content):
-            saved = script_service.save_upload(filename, content)
-            r = official_service.import_zcode_bundle(content, name.strip() or filename,
-                                                     str(saved), orig_filename=filename)
-            return {"id": r["script_id"], "saved": saved.name, "cases": r["mapped"],
-                    "framework": "media_zcode",
-                    "message": f"识别为 Zcode(u2) 包 · 按覆盖矩阵接入 {r['mapped']} 条用例"
-                               + (f"（{r['unmatched']} 条未匹配官方库）" if r["unmatched"] else "")}
-        if is_zip and official_service.is_media_bundle(content):
-            saved = script_service.save_upload(filename, content)
-            r = official_service.import_media_bundle(content, name.strip() or filename,
-                                                     str(saved), orig_filename=filename)
-            return {"id": r["script_id"], "saved": saved.name, "cases": r["mapped"],
-                    "framework": "media_automation",
-                    "message": f"识别为 Media_automation 包 · 按映射接入 {r['mapped']} 条用例"
-                               + (f"（{r['unmatched']} 条未匹配官方库）" if r["unmatched"] else "")}
-        picked = json.loads(cases)
-        case_ids = [c[0] for c in picked]
-        case_meta = {c[0]: (c[1], c[2]) for c in picked}
-        return script_service.upload(filename, content, name.strip(), app,
-                                     version.strip() or "v1.0", case_ids, case_meta)
+            r = official_service.import_zcode_bundle(content, sname, ver, orig_filename=filename)
+            fw_text = f"识别为 Zcode(u2) 包 · 按覆盖矩阵映射 {r['mapped']} 条用例"
+        elif is_zip and official_service.is_media_bundle(content):
+            r = official_service.import_media_bundle(content, sname, ver, orig_filename=filename)
+            fw_text = f"识别为 Media_automation 包 · 按映射 CSV 接入 {r['mapped']} 条用例"
+        else:
+            snapshot, matched, unmatched = script_service.snapshot_from_marks(filename, content)
+            r = script_service.save_version(sname, app, ver, config.FRAMEWORK_JDO,
+                                            filename, content, snapshot)
+            r["unmatched"] = len(unmatched)
+            fw_text = (f"识别 {len(matched) + len(unmatched)} 条用例标记 · 命中官方库 {len(matched)} 条"
+                       if (matched or unmatched) else "未识别到用例标记 · 不计入覆盖率")
+        return {**r, "message": f"{_ACTION_TEXT.get(r['action'], '已保存')} {ver} · {fw_text}"
+                                + (f"（{r['unmatched']} 条未匹配官方库）" if r.get("unmatched") else "")}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------------- 版本管理：激活 / 删除 / 按版本下载 ----------------
+@router.post("/{script_id}/versions/{version_id}/activate")
+def activate_version(script_id: int, version_id: int):
+    """把指定版本设为当前（覆盖率与执行随之切换到该版本）。"""
+    try:
+        script_service.activate_version(script_id, version_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"ok": True}
+
+
+@router.delete("/{script_id}/versions/{version_id}")
+def delete_version(script_id: int, version_id: int):
+    """删除某版本（至少保留一个；删当前版本时自动激活剩余最新版）。"""
+    try:
+        script_service.delete_version(script_id, version_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True}
+
+
+@router.get("/{script_id}/versions/{version_id}/download")
+def download_version(script_id: int, version_id: int):
+    got = script_service.get_version_download(script_id, version_id)
+    if not got:
+        raise HTTPException(status_code=404, detail="该版本无原件")
+    path, filename = got
+    return FileResponse(path, filename=filename)
 
 
 @router.get("/scaffold/preview")
@@ -89,9 +128,11 @@ def scaffold():
 def run_script(script_id: int, body: RunScriptBody):
     """按脚本执行：直接跑该脚本对应框架的用例（脚本管理页「执行」入口）。"""
     try:
-        job_id = run_service.start_script(script_id, body.brands)
+        job_id = run_service.start_script(script_id, body.brands, body.device_ids)
+    except run_service.DeviceBusyError as e:   # 台架被占用 → 明确拒绝
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
     job = run_service.get_progress(job_id)
     return {"job": job_id, "rows": job["rows"], "brands": job["brands"], "total": job["total"]}
 

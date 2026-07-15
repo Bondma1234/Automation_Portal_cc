@@ -29,14 +29,16 @@ class TaskBody(BaseModel):
 
 
 class RunBody(BaseModel):
-    """执行中心发起执行"""
+    """执行中心发起执行：device_ids=点名的真机台架（一台一列）；brands=模拟品牌列/旧路径"""
     task: str                        # 任务名
-    brands: List[str] = Field(min_length=1)
+    brands: List[str] = []
+    device_ids: List[int] = []
 
 
 class RunScriptBody(BaseModel):
     """脚本管理页发起执行（按脚本跑其对应框架的用例）"""
-    brands: List[str] = Field(min_length=1)
+    brands: List[str] = []
+    device_ids: List[int] = []
 
 
 class SettingsBody(BaseModel):
@@ -52,3 +54,12 @@ class AppBody(BaseModel):
     activity: str = ""
     version: str = "—"
     account: str = "—"
+
+
+class DeviceBody(BaseModel):
+    """接入台架：udid 即 adb serial（网络设备 ip:5555），入库即进该品牌执行设备池"""
+    name: str = Field(min_length=1)
+    brand: str = Field(min_length=1)
+    udid: str = Field(min_length=1)
+    resolution: str = "—"
+    os: str = "—"

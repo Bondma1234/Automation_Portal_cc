@@ -17,11 +17,17 @@ class NoCacheStaticFiles(StaticFiles):
 
     浏览器对 ES 模块有激进的内存缓存，改了 js 刷新页面可能仍跑旧代码；
     no-cache 要求每次向服务器校验（配合 ETag，未变仍走 304，开销可忽略）。
+    例外：vendor/ 第三方库（图标字体 818KB、Chart.js）基本不变 → 长缓存，
+    否则每次都要校验、硬刷新整包重下，首屏图标显示明显变慢。
     """
 
     def file_response(self, *args, **kwargs):
         resp = super().file_response(*args, **kwargs)
-        resp.headers["Cache-Control"] = "no-cache"
+        full_path = str(args[0]) if args else ""
+        if "vendor" in full_path.replace("\\", "/").split("/"):
+            resp.headers["Cache-Control"] = "public, max-age=604800"   # 7 天
+        else:
+            resp.headers["Cache-Control"] = "no-cache"
         return resp
 
 app = FastAPI(title="JDO 车机自动化测试平台", version="0.2.0")

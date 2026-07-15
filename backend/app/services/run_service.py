@@ -1,11 +1,13 @@
 """执行引擎：一次执行 = 任务 × 勾选品牌，产出矩阵进度与报告。
 
 双模式策略（按品牌逐一决定，可混跑）：
-- 真机模式：品牌在 config.REAL_DEVICE_MAP 中且 adb 可达 →
+- 真机模式：品牌在 devices 表的执行池中有「可达且空闲」的台架 → 从池里分配一台
+  （同品牌多台架自动挑空闲，双奥迪即并行分摊；台架互斥：一台同时只跑一个 job，
+  该品牌有台架但全被占用时**拒绝启动**，防止并发会话在同一台架上打架）→
   subprocess 调 pytest（--jdo-cases 按任务选例；conftest 把每条结果实时追加到
   --jdo-progress jsonl，本引擎边跑边读、逐格点亮矩阵）；执行前先 --collect-only
   预收集，矩阵只画框架里真实存在的用例行。
-- 模拟模式：品牌无可达台架时回退演示执行
+- 模拟模式：品牌池里无台架/全部不可达时回退演示执行
   （节奏与原型一致：每格约 0.23s，固定失败 = 爱奇艺视频播放 @ 保时捷）。
 
 全部品牌都是模拟 → 保持与原型完全一致的「逐格顺序点亮」；
@@ -25,7 +27,10 @@ from datetime import datetime
 from pathlib import Path
 
 from .. import config, db
-from . import media_runner, task_service, zcode_runner
+from . import (media_runner, preflight_service, resource_service, runner_common,
+               task_service, zcode_runner)
+
+_session_timeout = runner_common.session_timeout   # 会话超时预算（按测试数，见 runner_common）
 
 # 外部框架 -> 执行适配器（run_brand / prepare_bundle / collectable 同签名）
 _ADAPTERS = {
@@ -35,6 +40,15 @@ _ADAPTERS = {
 
 _jobs: dict = {}                 # job_id -> 进度字典（前端轮询读取）
 _lock = threading.Lock()
+
+# 台架互斥锁：serial -> job_id。同一台架同时只允许一个 pytest 会话
+# （并发会话互相 back/launch/dump 打架会把被测 App 打进坏状态，2026-07-13 排障结论）。
+_device_busy: dict = {}
+_alloc_lock = threading.Lock()   # 分配期间独立加锁（含探测，秒级），不占用进度轮询的 _lock
+
+
+class DeviceBusyError(Exception):
+    """品牌池里有台架但全被占用 —— 拒绝启动而不是排队/转模拟，让用户明确感知。"""
 
 # 模拟模式每格耗时（秒），与原型 setTimeout 230ms 一致
 _STEP_SECONDS = 0.23
@@ -167,64 +181,128 @@ def plan_rows_for_script(script_id: int):
     return rows, framework, script
 
 
-def _launch(rows: list, framework: str, script, brands: list, source: dict) -> str:
-    """共用启动内核：预收集 → 建 job → 起后台执行线程，返回 job_id。
+def _build_targets(brands: list, device_ids: list, job_id: str) -> list:
+    """把入参解析成执行列 targets：[{column, brand, serial|None}, ...]，并锁定台架。
+
+    - device_ids（执行中心点名台架）：一台一列（列名=台架名）。用户明确选择 →
+      不存在/非网络设备/被占用/不可达 都**直接报错拒绝**，不静默降级；
+    - brands：无 device_ids 时走原品牌池分配（可达且空闲→真机，否则转模拟）；
+      有 device_ids 时 brands 仅作为附加的模拟演示列。
+    """
+    targets = []
+    with _alloc_lock:                    # 分配串行化：防止两个并发请求抢到同一台架
+        if device_ids:
+            devs = resource_service.get_devices(device_ids)
+            if len(devs) != len(device_ids):
+                raise ValueError("所选台架不存在，请刷新设备列表")
+            for d in devs:
+                if ":" not in (d["udid"] or ""):
+                    raise ValueError(f"「{d['name']}」是演示占位设备，不能真机执行")
+                if d["udid"] in _device_busy:
+                    raise DeviceBusyError(f"「{d['name']}」正被其它执行占用（同一台架同时只允许一个任务）")
+            for d in devs:
+                if not _probe_device(d["udid"]):
+                    raise ValueError(f"「{d['name']}」({d['udid']}) adb 不可达，请到设备管理探活确认")
+                targets.append({"column": d["name"], "brand": d["brand"], "serial": d["udid"]})
+            for b in brands:             # 附加模拟列
+                targets.append({"column": f"{b}(模拟)", "brand": b, "serial": None})
+        else:
+            pool = resource_service.brand_pool()
+            for b in brands:
+                serial, saw_busy = None, False
+                for cand in pool.get(b, []):
+                    if cand in _device_busy:
+                        saw_busy = True  # 有台架但在忙，继续找池里下一台
+                        continue
+                    if _probe_device(cand):
+                        serial = cand
+                        break
+                if serial is None and saw_busy:
+                    raise DeviceBusyError(
+                        f"{b}台架正被其它执行占用（同一台架同时只允许一个任务），请等其完成后再试")
+                targets.append({"column": b, "brand": b, "serial": serial})
+        for t in targets:
+            if t["serial"]:
+                _device_busy[t["serial"]] = job_id
+    return targets
+
+
+def _launch(rows: list, framework: str, script, brands: list, device_ids: list,
+            source: dict) -> str:
+    """共用启动内核：解析执行列（点名设备/品牌池+互斥锁）→ 预收集 → 建 job → 起线程。
 
     source: {"task": 名} 或 {"script": 名} —— 仅用于 job 展示与报告落库标签。
+    台架被占用抛 DeviceBusyError（API 转 409）；点名设备不可用抛 ValueError（API 转 400）。
     """
+    if not brands and not device_ids:
+        raise ValueError("请至少选择一台执行设备或一个品牌")
     bundle_dir = None
-    modes = {}
-    for b in brands:
-        serial = config.REAL_DEVICE_MAP.get(b)
-        modes[b] = serial if serial and _probe_device(serial) else None
-
-    logs = []
-    if any(modes.values()):
-        adapter = _ADAPTERS.get(framework)
-        if adapter and script:
-            bundle_dir = adapter.prepare_bundle(script["id"], script["file_path"])
-            available = adapter.collectable(bundle_dir, [cid for _, cid in rows])
-        else:
-            available = _collect_available([cid for _, cid in rows])
-        real_rows = [r for r in rows if r[1] in available]
-        if real_rows:
-            rows = real_rows
-            logs.append(f"› 预收集完成 · {_FW_NAME.get(framework, '框架')} 内可执行用例 {len(rows)} 条")
-        else:
-            logs.append("⚠ 框架内未收集到可执行用例，全部品牌转模拟执行")
-            modes = {b: None for b in brands}
-
-    for b in brands:
-        logs.append(f"› 连接设备 {b}台架 ({modes[b]}) ✓ 真机" if modes[b]
-                    else f"› 连接设备 {b}台架 (adb) ✓")
-
     job_id = uuid.uuid4().hex[:12]
-    job = {
-        "id": job_id, "task": source.get("task") or source.get("script", ""), "brands": brands,
-        "rows": [r[0] for r in rows], "cells": {},
-        "done": 0, "total": len(rows) * len(brands),
-        "status": "running", "logs": logs, "summary": "",
-        "framework": framework,
-        "real": {b: bool(s) for b, s in modes.items()},
-    }
-    with _lock:
-        _jobs[job_id] = job
-    threading.Thread(target=_run_job, args=(job, rows, modes, framework, bundle_dir),
-                     daemon=True).start()
-    return job_id
+    targets = _build_targets(brands, device_ids, job_id)
+
+    try:
+        logs = []
+        if any(t["serial"] for t in targets):
+            adapter = _ADAPTERS.get(framework)
+            if adapter and script:
+                bundle_dir = adapter.prepare_bundle(script["id"], script["file_path"])
+                available = adapter.collectable(bundle_dir, [cid for _, cid in rows])
+            else:
+                available = _collect_available([cid for _, cid in rows])
+            real_rows = [r for r in rows if r[1] in available]
+            if real_rows:
+                rows = real_rows
+                logs.append(f"› 预收集完成 · {_FW_NAME.get(framework, '框架')} 内可执行用例 {len(rows)} 条")
+            else:
+                logs.append("⚠ 框架内未收集到可执行用例，全部转模拟执行")
+                _release_devices(job_id)
+                for t in targets:
+                    t["serial"] = None
+
+        for t in targets:
+            logs.append(f"› 已选择 {t['column']} ({t['serial']})，执行前环境预检" if t["serial"]
+                        else f"› 连接设备 {t['column']}台架 (adb) ✓")
+
+        columns = [t["column"] for t in targets]
+        job = {
+            "id": job_id, "task": source.get("task") or source.get("script", ""),
+            "brands": columns,           # 矩阵列名（设备名或品牌名），前端直接用
+            "targets": [{"column": t["column"], "brand": t["brand"], "serial": t["serial"]}
+                        for t in targets],
+            "rows": [r[0] for r in rows], "cells": {},
+            "done": 0, "total": len(rows) * len(targets),
+            "status": "running", "logs": logs, "summary": "",
+            "framework": framework,
+            "real": {t["column"]: bool(t["serial"]) for t in targets},
+        }
+        with _lock:
+            _jobs[job_id] = job
+        threading.Thread(target=_run_job, args=(job, rows, targets, framework, bundle_dir),
+                         daemon=True).start()
+        return job_id
+    except Exception:
+        _release_devices(job_id)     # 建 job 失败（解包/收集异常等）不能吞掉台架锁
+        raise
 
 
-def start(task_name: str, brands: list) -> str:
+def _release_devices(job_id: str):
+    """释放该 job 占用的全部台架（执行结束 / 启动失败时调用，幂等）。"""
+    with _alloc_lock:
+        for s in [s for s, j in _device_busy.items() if j == job_id]:
+            del _device_busy[s]
+
+
+def start(task_name: str, brands: list, device_ids: list = None) -> str:
     """按任务执行：任务用例 → 覆盖最多的框架路由。"""
     rows = plan_rows(task_name)
     framework, script = _resolve_execution(rows)
-    return _launch(rows, framework, script, brands, {"task": task_name})
+    return _launch(rows, framework, script, brands, device_ids or [], {"task": task_name})
 
 
-def start_script(script_id: int, brands: list) -> str:
+def start_script(script_id: int, brands: list, device_ids: list = None) -> str:
     """按脚本执行：直接跑该脚本对应框架的用例（脚本管理页的「执行」入口）。"""
     rows, framework, script = plan_rows_for_script(script_id)
-    return _launch(rows, framework, script, brands, {"script": script["name"]})
+    return _launch(rows, framework, script, brands, device_ids or [], {"script": script["name"]})
 
 
 def get_progress(job_id: str):
@@ -234,42 +312,81 @@ def get_progress(job_id: str):
         return dict(job) if job else None
 
 
-# ---------------------------------------------------------------- 执行调度
-def _run_job(job: dict, rows: list, modes: dict, framework=None, bundle_dir=None):
-    """总调度：全模拟走原型节奏的顺序执行；有真机则按品牌并行（按框架路由）。"""
-    started = time.time()
-    brands = job["brands"]
-
-    if not any(modes.values()):
-        _run_all_simulated(job, rows)                  # 与原型逐格顺序完全一致
-    else:
-        adapter = _ADAPTERS.get(framework)
-        threads = []
-        for bi, brand in enumerate(brands):
-            if not modes[brand]:
-                t = threading.Thread(target=_run_brand_simulated,
-                                     args=(job, rows, brand, bi), daemon=True)
-            elif adapter and bundle_dir:
-                # 外部框架执行适配器（Media_automation / Zcode）：跑上传包自己的 pytest
-                t = threading.Thread(
-                    target=adapter.run_brand,
-                    args=(job, rows, brand, bi, modes[brand], bundle_dir,
-                          _mark_for(job), _log_for(job)), daemon=True)
-            else:
-                t = threading.Thread(target=_run_brand_real,
-                                     args=(job, rows, brand, bi, modes[brand]), daemon=True)
-            t.start()
-            threads.append(t)
-        for t in threads:
-            t.join(timeout=config.REAL_RUN_TIMEOUT + 30)
-
-    elapsed = time.time() - started
-    fail_by_brand = _count_fails(job, rows)
-    fails = sum(fail_by_brand.values())
+def list_active() -> list:
+    """进行中的 job 摘要（新→旧）：执行中心切走再回来时据此重连现场。"""
     with _lock:
-        job["status"] = "done"
-        job["summary"] = f"✓ 执行完成 · 通过 {job['total'] - fails}/{job['total']} · 失败 {fails}"
-    _persist_reports(job, rows, fail_by_brand, elapsed)
+        return [{"job": j["id"], "task": j["task"], "brands": j["brands"],
+                 "framework": j["framework"], "total": j["total"], "done": j["done"]}
+                for j in reversed(list(_jobs.values())) if j["status"] == "running"]
+
+
+def stop_job(job_id: str) -> bool:
+    """请求终止：置 stop 标志，各执行循环在下个轮询点感知（真机线程随即 kill pytest）。
+
+    返回是否找到了进行中的 job；实际停止是异步的（前端轮询到 status=stopped 为准）。
+    """
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job or job["status"] != "running":
+            return False
+        job["stop"] = True
+        job["logs"].append("⚠ 收到终止请求，正在停止各品牌执行…")
+        return True
+
+
+# ---------------------------------------------------------------- 执行调度
+def _run_real_column(job: dict, rows: list, target: dict, bi: int, adapter, bundle_dir):
+    """真机列执行：先环境预检（不通过整列记「未执行」并说明原因），再分发到执行器。"""
+    label, serial = target["column"], target["serial"]
+    if not preflight_service.run_preflight(serial, label, _log_for(job),
+                                           should_stop=lambda: job.get("stop")):
+        _fill_na(job, rows, bi)
+        return
+    if adapter and bundle_dir:
+        # 外部框架执行适配器（Media_automation / Zcode）：跑上传包自己的 pytest
+        adapter.run_brand(job, rows, label, bi, serial, bundle_dir,
+                          _mark_for(job), _log_for(job))
+    else:
+        _run_brand_real(job, rows, label, bi, serial)
+
+
+def _run_job(job: dict, rows: list, targets: list, framework=None, bundle_dir=None):
+    """总调度：全模拟走原型节奏的顺序执行；有真机则按列并行（真机列先过预检）。"""
+    try:
+        started = time.time()
+
+        if not any(t["serial"] for t in targets):
+            _run_all_simulated(job, rows)              # 与原型逐格顺序完全一致
+        else:
+            adapter = _ADAPTERS.get(framework)
+            threads = []
+            for bi, target in enumerate(targets):
+                if not target["serial"]:
+                    t = threading.Thread(target=_run_brand_simulated,
+                                         args=(job, rows, target["brand"], bi), daemon=True)
+                else:
+                    t = threading.Thread(target=_run_real_column,
+                                         args=(job, rows, target, bi, adapter, bundle_dir),
+                                         daemon=True)
+                t.start()
+                threads.append(t)
+            for t in threads:
+                t.join(timeout=_session_timeout(len(rows)) + config.PREFLIGHT_FOREGROUND_TIMEOUT + 60)
+
+        elapsed = time.time() - started
+        results = _count_results(job, rows)
+        oks = sum(r["ok"] for r in results.values())
+        fails = sum(r["fail"] for r in results.values())
+        nas = sum(r["na"] for r in results.values())
+        stopped = job.get("stop", False)
+        with _lock:
+            job["status"] = "stopped" if stopped else "done"
+            head = "⚠ 已终止" if stopped else "✓ 执行完成"
+            job["summary"] = (f"{head} · 通过 {oks}/{job['total']} · 失败 {fails}"
+                              + (f" · 未执行 {nas}" if nas else ""))
+        _persist_reports(job, rows, targets, results, elapsed)
+    finally:
+        _release_devices(job["id"])                    # 无论成败都归还台架
 
 
 def _sim_result(case_id: str, brand: str) -> bool:
@@ -299,10 +416,21 @@ def _log_for(job: dict):
     return add_log
 
 
+def _fill_na(job: dict, rows: list, bi: int):
+    """终止/截断后把该品牌列还没有结果的格子补成「未执行」灰格（与失败区分，诚实展示）。"""
+    for ci in range(len(rows)):
+        if job["cells"].get(f"{ci}-{bi}") not in ("ok", "fail"):
+            _mark(job, ci, bi, "na", count_done=True)
+
+
 def _run_all_simulated(job: dict, rows: list):
     """纯模拟：用例为外层、品牌为内层逐格推进（原型演示节奏）。"""
     for ci, (label, case_id) in enumerate(rows):
         for bi, brand in enumerate(job["brands"]):
+            if job.get("stop"):
+                for b2 in range(len(job["brands"])):
+                    _fill_na(job, rows, b2)
+                return
             _mark(job, ci, bi, "run")
             time.sleep(_STEP_SECONDS)
             ok = _sim_result(case_id, brand)
@@ -315,6 +443,9 @@ def _run_all_simulated(job: dict, rows: list):
 def _run_brand_simulated(job: dict, rows: list, brand: str, bi: int):
     """混跑时的模拟品牌线程：单列自上而下推进。"""
     for ci, (label, case_id) in enumerate(rows):
+        if job.get("stop"):
+            _fill_na(job, rows, bi)
+            return
         _mark(job, ci, bi, "run")
         time.sleep(_STEP_SECONDS)
         ok = _sim_result(case_id, brand)
@@ -347,12 +478,13 @@ def _run_brand_real(job: dict, rows: list, brand: str, bi: int, serial: str):
 
     _mark(job, 0, bi, "run")                       # 第一格先亮「执行中」
     finished_rows = set()
+    truncated = False                              # 超时/终止截断：剩余行记「未执行」而非失败
     proc = None
     try:
         with open(log_file, "w", encoding="utf-8") as lf:
             proc = subprocess.Popen(cmd, cwd=str(config.FRAMEWORK_DIR),
                                     stdout=lf, stderr=subprocess.STDOUT, env=env)
-            deadline = time.time() + config.REAL_RUN_TIMEOUT
+            deadline = time.time() + _session_timeout(len(rows))
             pos = 0                                # 已消费的进度文件偏移
             while True:
                 if progress_file.exists():
@@ -391,8 +523,15 @@ def _run_brand_real(job: dict, rows: list, brand: str, bi: int, serial: str):
                     time.sleep(0.5)                # 进程结束后再补读一轮尾部
                     if not progress_file.exists() or progress_file.stat().st_size <= pos:
                         break                      # 无新增内容（或从未产生）→ 收尾
+                if job.get("stop"):
+                    proc.kill()
+                    truncated = True
+                    with _lock:
+                        job["logs"].append(f"⚠ {brand}台架 已按请求终止 pytest 会话")
+                    break
                 if time.time() > deadline:
                     proc.kill()
+                    truncated = True
                     with _lock:
                         job["logs"].append(f"⚠ {brand}台架 执行超时，已终止 pytest 会话")
                     break
@@ -403,22 +542,28 @@ def _run_brand_real(job: dict, rows: list, brand: str, bi: int, serial: str):
         with _lock:
             job["logs"].append(f"⚠ {brand}台架 执行线程异常：{type(e).__name__}: {e}")
     finally:
-        # 没有结果的行（收集缺失/异常/超时）记失败，保证矩阵与统计完整
-        for ci, (label, _) in enumerate(rows):
-            if ci not in finished_rows:
-                _mark(job, ci, bi, "fail", count_done=True)
-                with _lock:
-                    job["logs"].append(f"⚠ {label} @ {brand} 无执行结果，记失败（详见 {log_file.name}）")
+        # 没有结果的行：终止/超时截断 → 记「未执行」；异常无结果 → 记失败
+        if truncated:
+            _fill_na(job, rows, bi)
+        else:
+            for ci, (label, _) in enumerate(rows):
+                if ci not in finished_rows:
+                    _mark(job, ci, bi, "fail", count_done=True)
+                    with _lock:
+                        job["logs"].append(f"⚠ {label} @ {brand} 无执行结果，记失败（详见 {log_file.name}）")
 
 
 # ---------------------------------------------------------------- 落库
-def _count_fails(job: dict, rows: list) -> dict:
-    """从矩阵格子统计各品牌失败数（真机/模拟统一口径；无结果=失败）。"""
-    fails = {}
-    for bi, brand in enumerate(job["brands"]):
-        fails[brand] = sum(
-            1 for ci in range(len(rows)) if job["cells"].get(f"{ci}-{bi}") != "ok")
-    return fails
+def _count_results(job: dict, rows: list) -> dict:
+    """从矩阵格子统计各列 通过/失败/未执行（键=列名；na=终止/超时/预检未过没跑到的行）。"""
+    results = {}
+    for bi, column in enumerate(job["brands"]):
+        c = {"ok": 0, "fail": 0, "na": 0}
+        for ci in range(len(rows)):
+            st = job["cells"].get(f"{ci}-{bi}")
+            c["ok" if st == "ok" else ("na" if st == "na" else "fail")] += 1
+        results[column] = c
+    return results
 
 
 def _fmt_dur(seconds: float) -> str:
@@ -426,24 +571,30 @@ def _fmt_dur(seconds: float) -> str:
     return f"{seconds:.1f}s" if seconds < 60 else f"{round(seconds / 60)}m"
 
 
-def _persist_reports(job: dict, rows: list, fail_by_brand: dict, elapsed: float):
-    """执行结束落库：每个品牌一条报告 + 用例明细；并回写相关脚本的最近结果。"""
+def _persist_reports(job: dict, rows: list, targets: list, results: dict, elapsed: float):
+    """执行结束落库：每列一条报告（品牌字段取该列所属品牌）+ 用例明细；回写脚本最近结果。
+
+    终止的执行照常落库（已跑出的真结果不丢），报告状态记「终止」；
+    没跑到的用例明细记 na（前端显示「未执行」灰标）。
+    """
     task = task_service.get_task(job["task"])
     apps = json.loads(task["apps_json"]) if task else []
     app_label = apps[0] if len(apps) == 1 else "多 App"
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     total = len(rows)
+    stopped = job.get("stop", False)
     failed_case_ids = set()
     new_report_ids = []                      # 落库后交给 Allure 后台预生成
 
     with closing(db.get_conn()) as conn:
-        for bi, brand in enumerate(job["brands"]):
-            fails = fail_by_brand[brand]
+        for bi, target in enumerate(targets):
+            r = results[target["column"]]
+            status = "终止" if stopped else ("失败" if r["fail"] or r["na"] else "通过")
             cur = conn.execute(
                 "INSERT INTO reports(task,app,brand,pass,total,dur,status,time,trigger_type)"
                 " VALUES(?,?,?,?,?,?,?,?,?)",
-                (job["task"], app_label, brand, total - fails, total,
-                 _fmt_dur(elapsed), "失败" if fails else "通过", now, "手动"))
+                (job["task"], app_label, target["brand"], r["ok"], total,
+                 _fmt_dur(elapsed), status, now, "手动"))
             rid = cur.lastrowid
             new_report_ids.append(rid)
             # 真机品牌：把 pytest 产出的 Allure 结果移入报告专属目录（供惰性生成 HTML）
@@ -453,7 +604,8 @@ def _persist_reports(job: dict, rows: list, fail_by_brand: dict, elapsed: float)
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(allure_src), str(dst))
             for ci, (label, case_id) in enumerate(rows):
-                res = "ok" if job["cells"].get(f"{ci}-{bi}") == "ok" else "fail"
+                st = job["cells"].get(f"{ci}-{bi}")
+                res = st if st in ("ok", "na") else "fail"
                 if res == "fail":
                     failed_case_ids.add(case_id)
                 conn.execute("INSERT INTO report_cases(report_id,case_id,name,result) VALUES(?,?,?,?)",

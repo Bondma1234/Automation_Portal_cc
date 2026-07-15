@@ -22,6 +22,7 @@ export const api = {
   put: (url, body) => request(url, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }),
+  del: (url) => request(url, { method: 'DELETE' }),
   /** 多部件表单（脚本上传 / Excel 导入） */
   postForm: (url, formData) => request(url, { method: 'POST', body: formData }),
   /** 触发浏览器真实下载（Excel 导出 / 模板 / 脚本下载） */

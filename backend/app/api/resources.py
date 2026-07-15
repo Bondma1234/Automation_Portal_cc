@@ -1,7 +1,7 @@
 """资源与系统接口：设备 / 应用 / 定时调度 / 系统设置 / 成员。"""
 from fastapi import APIRouter, HTTPException
 
-from ..models import AppBody, SettingsBody
+from ..models import AppBody, DeviceBody, SettingsBody
 from ..services import resource_service
 
 router = APIRouter(prefix="/api", tags=["resources"])
@@ -10,6 +10,33 @@ router = APIRouter(prefix="/api", tags=["resources"])
 @router.get("/devices")
 def devices():
     return resource_service.list_devices()
+
+
+@router.post("/devices")
+def create_device(body: DeviceBody):
+    """接入台架：入库即进该品牌执行池（udid 为 ip:5555 时），并立即探活一次。"""
+    try:
+        resource_service.create_device(body.name.strip(), body.brand.strip(),
+                                       body.udid.strip(), body.resolution.strip(),
+                                       body.os.strip())
+    except ValueError as e:            # udid 重复
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True}
+
+
+@router.post("/devices/probe")
+def probe_devices():
+    """并行探活全部台架（adb 可达 + root 状态）并回写，返回最新列表。"""
+    return resource_service.probe_devices()
+
+
+@router.delete("/devices/{device_id}")
+def delete_device(device_id: int):
+    try:
+        resource_service.delete_device(device_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"ok": True}
 
 
 @router.get("/apps")

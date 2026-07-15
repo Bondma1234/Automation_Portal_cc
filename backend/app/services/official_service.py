@@ -121,58 +121,40 @@ def is_media_bundle(zip_bytes: bytes) -> bool:
         return False
 
 
-def import_media_bundle(zip_bytes: bytes, name: str, saved_path: str,
-                        orig_filename: str = "bundle.zip") -> dict:
-    """Media_automation 适配器：解析包内映射 CSV → 建 media_automation 脚本 + 覆盖率映射。
+def _parse_media_mapping(zip_bytes: bytes) -> tuple:
+    """解析 Media 包映射 CSV，返回 (命中官方库的映射快照, 已自动化行数)。
 
     映射规则：CSV 每行 excel_id + status，凡 status 属于已自动化且对应官方用例
-    （KW-{excel_id}）存在于 cases 表，即建立 script_case 映射。
-    kuwo 专用包，用例编号前缀取 KW。返回覆盖统计。
-    file_name 存原始文件名（带 .zip），保证下载时带正确后缀。
+    （KW-{excel_id}）存在于 cases 表，即计入。只映射真实存在的用例，防虚高。
     """
-    prefix = "KW"                                # 该包为酷我 One Info 自动化
-    app = "酷我音乐"
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         csv_name = _find_mapping_csv(zf)
         if not csv_name:
             raise ValueError("未在包内找到映射 CSV，无法按 Media_automation 适配")
         text = zf.read(csv_name).decode("utf-8-sig", errors="replace")
-        # 统计包里实际的测试文件数作为版本参考
-        node_files = {n for n in zf.namelist() if n.startswith("tests/") and n.endswith(".py")}
 
-    reader = csv.DictReader(io.StringIO(text))
-    wanted = []      # (case_id, module, priority)
-    total_rows = automated_rows = 0
-    for r in reader:
-        total_rows += 1
+    wanted, automated_rows = [], 0
+    for r in csv.DictReader(io.StringIO(text)):
         if (r.get("status") or "").strip() not in _AUTOMATED_STATUS:
             continue
         if not (r.get("automation_case") or "").strip():
             continue
         automated_rows += 1
-        wanted.append((case_id_for(prefix, r["excel_id"]),
-                       (r.get("module") or "").strip(), (r.get("priority") or "").strip()))
-
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        wanted.append([case_id_for("KW", r["excel_id"]),
+                       (r.get("module") or "").strip(), (r.get("priority") or "").strip()])
     with closing(db.get_conn()) as conn:
-        # 只映射到官方库中真实存在的用例（防止 CSV 与官方库对不上号造成虚高覆盖率）
-        existing = {r["id"] for r in conn.execute("SELECT id FROM cases WHERE app = ?", (app,))}
-        mapped = [(cid, m, p) for cid, m, p in wanted if cid in existing]
-        unmatched = automated_rows - len(mapped)
+        existing = {r["id"] for r in conn.execute("SELECT id FROM cases WHERE app = ?", ("酷我音乐",))}
+    return [w for w in wanted if w[0] in existing], automated_rows
 
-        cur = conn.execute(
-            "INSERT INTO scripts(name,app,version,framework,file_name,file_path,last_result,created_at)"
-            " VALUES(?,?,?,?,?,?, 'pending', ?)",
-            (name, app, f"{len(node_files)}个测试文件", config.FRAMEWORK_MEDIA,
-             orig_filename, saved_path, ts))
-        sid = cur.lastrowid
-        conn.executemany(
-            "INSERT OR IGNORE INTO script_case(script_id,case_id,module,priority) VALUES(?,?,?,?)",
-            [(sid, cid, m, p) for cid, m, p in mapped])
-        conn.commit()
 
-    return {"script_id": sid, "total_rows": total_rows, "automated": automated_rows,
-            "mapped": len(mapped), "unmatched": unmatched}
+def import_media_bundle(zip_bytes: bytes, name: str, version: str,
+                        orig_filename: str = "bundle.zip") -> dict:
+    """Media_automation 适配器：解析映射 CSV → 走多版本统一入口落库（save_version）。"""
+    from . import script_service
+    mapped, automated_rows = _parse_media_mapping(zip_bytes)
+    r = script_service.save_version(name, "酷我音乐", version, config.FRAMEWORK_MEDIA,
+                                    orig_filename, zip_bytes, mapped)
+    return {**r, "mapped": len(mapped), "unmatched": automated_rows - len(mapped)}
 
 
 # ---------------------------------------------------------------- Zcode 适配器
@@ -198,42 +180,43 @@ def is_zcode_bundle(zip_bytes: bytes) -> bool:
         return False
 
 
-def import_zcode_bundle(zip_bytes: bytes, name: str, saved_path: str,
-                        orig_filename: str = "bundle.zip") -> dict:
-    """Zcode 适配器：解析覆盖矩阵 markdown → 建 media_zcode 脚本 + 覆盖率映射。
+def _parse_zcode_mapping(zip_bytes: bytes) -> tuple:
+    """解析 Zcode 覆盖矩阵 markdown，返回 (命中官方库的映射快照, 矩阵去重编号数)。
 
     markdown 表把「自动化用例 ↔ Excel 编号」列出来；一个 Excel 编号即官方用例
-    KW-{编号}。只映射到官方库真实存在的用例。返回覆盖统计。
+    KW-{编号}。只映射到官方库真实存在的用例。
     """
     from . import zcode_runner
-    app = "酷我音乐"
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         md_text = _find_matrix_md(zf)
         if not md_text:
             raise ValueError("未在包内找到覆盖矩阵 markdown，无法按 Zcode 适配")
-        test_files = {n for n in zf.namelist() if "/test_" in n and n.endswith(".py")}
-
-    entries = zcode_runner.parse_matrix(md_text)          # (file, func, param, excel_id)
+    entries = zcode_runner.parse_matrix(md_text)              # (file, func, param, excel_id)
     wanted_ids = {case_id_for("KW", e[3]) for e in entries}   # 去重的官方用例编号
-
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with closing(db.get_conn()) as conn:
-        # 从官方库取真实存在用例的 module/priority（映射快照，行展开直接显示）
         meta = {r["id"]: (r["module"], r["priority"]) for r in
-                conn.execute("SELECT id, module, priority FROM cases WHERE app = ?", (app,))}
-        mapped = [(cid, *meta[cid]) for cid in wanted_ids if cid in meta]
-        unmatched = len(wanted_ids) - len(mapped)
+                conn.execute("SELECT id, module, priority FROM cases WHERE app = ?", ("酷我音乐",))}
+    return [[cid, *meta[cid]] for cid in sorted(wanted_ids) if cid in meta], len(wanted_ids)
 
-        cur = conn.execute(
-            "INSERT INTO scripts(name,app,version,framework,file_name,file_path,last_result,created_at)"
-            " VALUES(?,?,?,?,?,?, 'pending', ?)",
-            (name, app, f"{len(test_files)}个测试文件", config.FRAMEWORK_ZCODE,
-             orig_filename, saved_path, ts))
-        sid = cur.lastrowid
-        conn.executemany(
-            "INSERT OR IGNORE INTO script_case(script_id,case_id,module,priority) VALUES(?,?,?,?)",
-            [(sid, cid, m, p) for cid, m, p in mapped])
-        conn.commit()
 
-    return {"script_id": sid, "entries": len(entries), "distinct_cases": len(wanted_ids),
-            "mapped": len(mapped), "unmatched": unmatched}
+def import_zcode_bundle(zip_bytes: bytes, name: str, version: str,
+                        orig_filename: str = "bundle.zip") -> dict:
+    """Zcode 适配器：解析覆盖矩阵 markdown → 走多版本统一入口落库（save_version）。"""
+    from . import script_service
+    mapped, distinct = _parse_zcode_mapping(zip_bytes)
+    r = script_service.save_version(name, "酷我音乐", version, config.FRAMEWORK_ZCODE,
+                                    orig_filename, zip_bytes, mapped)
+    return {**r, "mapped": len(mapped), "unmatched": distinct - len(mapped)}
+
+
+def inspect_zip(content: bytes) -> dict:
+    """上传前只读识别（弹窗选完文件的摘要展示）：框架类型 + 映射命中统计，不落盘。"""
+    if is_zcode_bundle(content):
+        mapped, distinct = _parse_zcode_mapping(content)
+        return {"framework": config.FRAMEWORK_ZCODE, "matched": len(mapped),
+                "unmatched": distinct - len(mapped)}
+    if is_media_bundle(content):
+        mapped, automated = _parse_media_mapping(content)
+        return {"framework": config.FRAMEWORK_MEDIA, "matched": len(mapped),
+                "unmatched": automated - len(mapped)}
+    return {}
