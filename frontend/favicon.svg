@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <!-- 浏览器标签页图标：与侧栏 logo 同款（Tabler car · 青色 · 深色圆角底） -->
+  <rect width="24" height="24" rx="6" fill="#1e2836"/>
+  <g fill="none" stroke="#46c8d5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" transform="translate(3.4,3.4) scale(0.72)">
+    <path d="M7 17m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"/>
+    <path d="M17 17m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"/>
+    <path d="M5 17h-2v-6l2 -5h9l4 5h1a2 2 0 0 1 2 2v4h-2m-4 0h-6m-6 -6h15m-6 0v-5"/>
+  </g>
+</svg>

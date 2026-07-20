@@ -64,3 +64,7 @@
 .jdo .sw.on{background:var(--color-text-success);}
 .jdo .sw::after{content:'';position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;}
 .jdo .sw.on::after{left:17px;}
+
+/* 图标字体未就绪时隐藏字形（否则后备字体把图标码位画成「方框叉」tofu）；
+   visibility 隐藏保留占位尺寸，字体就绪/3s 超时后由 index.html 内联脚本摘除类名 */
+.icons-loading .ti{visibility:hidden;}

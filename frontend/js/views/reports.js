@@ -1,7 +1,7 @@
 /* 报告中心：日期/App/品牌/状态筛选 + 查询 + 导出；点击行展开详情
    （统计 chip + 用例结果列表 + 失败用例现场 + Allure 入口），布局与原型一致。 */
 import { api } from '../api.js';
-import { root, phead, btn, badge, chip, opt, toast } from '../ui.js';
+import { root, phead, btn, badge, chip, opt, toast, mdHead, openModal } from '../ui.js';
 import { store } from '../store.js';
 import { go } from '../router.js';
 
@@ -26,7 +26,7 @@ export async function render() {
 
   let body = reports.length ? '' : '<tr><td colspan="8" class="sub" style="text-align:center;padding:18px;">无匹配报告</td></tr>';
   reports.forEach((r, i) => {
-    body += `<tr class="rprow hov" data-i="${i}" style="cursor:pointer;"><td>#${r.id}</td><td>${r.task}</td><td>${r.brand}</td><td>${r.pass}/${r.total}</td><td class="sub">${r.dur}</td><td>${r.status === '通过' ? badge('b-ok', '通过') : (r.status === '终止' ? badge('b-mut', '终止') : badge('b-fail', '失败'))}</td><td class="sub">${r.time.slice(5)}</td><td style="text-align:right;"><button class="iconbtn alBtn" data-id="${r.id}" title="打开 Allure" aria-label="打开 Allure" style="width:auto;padding:0 8px;gap:4px;"><i class="ti ti-external-link" aria-hidden="true"></i> Allure</button></td></tr>`;
+    body += `<tr class="rprow hov" data-i="${i}" style="cursor:pointer;"><td>#${r.id}</td><td>${r.task}</td><td>${r.brand}</td><td>${r.pass}/${r.total}</td><td class="sub">${r.dur}</td><td>${r.status === '通过' ? badge('b-ok', '通过') : (r.status === '终止' ? badge('b-mut', '终止') : badge('b-fail', '失败'))}</td><td class="sub">${r.time.slice(5)}</td><td style="text-align:right;white-space:nowrap;"><button class="iconbtn alBtn" data-id="${r.id}" title="打开 Allure" aria-label="打开 Allure" style="width:auto;padding:0 8px;gap:4px;"><i class="ti ti-external-link" aria-hidden="true"></i> Allure</button> <button class="iconbtn rpDel" data-id="${r.id}" title="删除报告" aria-label="删除报告"><i class="ti ti-trash" aria-hidden="true"></i></button></td></tr>`;
     body += `<tr class="rpdet" data-i="${i}" style="display:none;"><td colspan="8" style="padding:4px 7px 10px;">${detail(r)}</td></tr>`;
   });
 
@@ -59,6 +59,25 @@ function detail(r) {
   return `<div style="background:var(--color-background-tertiary);border-radius:var(--border-radius-md);padding:11px 13px;">${head}<table class="tbl"><thead><tr><th>用例编号</th><th>用例</th><th>结果</th></tr></thead><tbody>${rows}${more}</tbody></table></div>`;
 }
 
+/* 删除确认弹窗（平台风格，与「终止执行」同款）：说明连带删除的内容，确认后调接口。 */
+function openDeleteConfirm(id) {
+  const html = mdHead('删除报告')
+    + `<div style="font-size:12.5px;line-height:1.75;color:var(--color-text-secondary);margin:2px 0 16px;">将删除报告 <b style="color:var(--color-text-primary);">#${id}</b> 及其用例明细与 Allure 产物（含截图/录屏附件），<span style="color:var(--color-text-danger);">不可恢复</span>。</div>`
+    + '<div style="display:flex;justify-content:flex-end;gap:8px;"><button id="mdCancel" class="gbtn">取消</button><button id="rpDelOk" class="pbtn" style="background:var(--color-text-danger);border-color:var(--color-text-danger);color:#fff;"><i class="ti ti-trash" style="vertical-align:-2px;" aria-hidden="true"></i> 确认删除</button></div>';
+  const ov = openModal(html, 380);
+  ov.querySelector('#rpDelOk').addEventListener('click', async (e) => {
+    const b = e.target.closest('button');
+    b.disabled = true;
+    b.textContent = '删除中…';
+    try {
+      await api.del(`/api/reports/${id}`);
+      ov.remove();
+      toast(`报告 #${id} 已删除`);
+      go('reports');
+    } catch (err) { toast(err.message); ov.remove(); }
+  });
+}
+
 export function init() {
   const el = root();
   el.querySelector('#rQuery').addEventListener('click', () => {
@@ -80,6 +99,13 @@ export function init() {
       if (e.target.closest('button')) return;
       const det = el.querySelector(`.rpdet[data-i="${row.dataset.i}"]`);
       det.style.display = det.style.display === 'none' ? 'table-row' : 'none';
+    });
+  });
+  // 删除报告：确认弹窗 → DELETE（行点击展开逻辑已排除按钮，无需 stopPropagation 之外的处理）
+  el.querySelectorAll('.rpDel').forEach((b) => {
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openDeleteConfirm(+b.dataset.id);
     });
   });
   // 打开 Allure：列表行与详情内的按钮共用（首次点击后端惰性生成，约 5~15s）

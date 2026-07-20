@@ -14,6 +14,16 @@ def list_reports(date_from: str = "", date_to: str = "", app: str = "",
     return report_service.list_reports(date_from, date_to, app, brand, status)
 
 
+@router.delete("/{report_id}")
+def delete_report(report_id: int):
+    """删除报告（主记录 + 用例明细 + Allure 产物），不可恢复。"""
+    try:
+        report_service.delete_report(report_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"ok": True}
+
+
 @router.get("/{report_id}/allure")
 def allure_report(report_id: int):
     """确保该报告的 Allure HTML 已生成（惰性，首次约 5~15s），返回访问地址。"""

@@ -60,6 +60,17 @@ def _worker():
             _queue.task_done()
 
 
+def purge(report_id: int):
+    """删除该报告的全部 Allure 产物（结果目录 + HTML 目录，含截图/录屏附件）。
+
+    与生成互斥：拿同一把报告锁再删，避免「删到一半、后台预生成又把目录写回来」。
+    报告的 DB 记录应已先删——生成器兜底合成需要报告数据，查不到会干净地失败。
+    """
+    with _lock_for(report_id):
+        shutil.rmtree(config.ALLURE_RESULTS_DIR / str(report_id), ignore_errors=True)
+        shutil.rmtree(config.ALLURE_HTML_DIR / str(report_id), ignore_errors=True)
+
+
 def enqueue(report_id: int, priority: int = 0):
     """报告入队预生成。priority 0=执行新产出（优先），1=启动预热积压。
 

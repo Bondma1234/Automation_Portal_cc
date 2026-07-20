@@ -30,7 +30,7 @@ class NoCacheStaticFiles(StaticFiles):
             resp.headers["Cache-Control"] = "no-cache"
         return resp
 
-app = FastAPI(title="JDO 车机自动化测试平台", version="0.2.0")
+app = FastAPI(title="APP 车机自动化测试平台", version="0.2.0")
 
 # 开发期允许跨域（前端也可独立起静态服务调试）；同源部署时不影响
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])

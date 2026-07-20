@@ -1,10 +1,26 @@
-"""测试报告业务逻辑：筛选查询 / 详情 / 导出。"""
+"""测试报告业务逻辑：筛选查询 / 详情 / 导出 / 删除。"""
 import io
 from contextlib import closing
 
 from openpyxl import Workbook
 
 from .. import db
+
+
+def delete_report(report_id: int):
+    """删除报告：主记录 + 用例明细 + Allure 产物（真机报告附件占磁盘，一并清理）。
+
+    不可恢复；不存在抛 ValueError（API 层转 404）。工作台/统计实时聚合 reports 表，
+    删除后自然重算，无悬空引用（覆盖率/脚本最近结果均不依赖本表）。
+    """
+    with closing(db.get_conn()) as conn:
+        if not conn.execute("SELECT 1 FROM reports WHERE id = ?", (report_id,)).fetchone():
+            raise ValueError("报告不存在")
+        conn.execute("DELETE FROM report_cases WHERE report_id = ?", (report_id,))
+        conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+        conn.commit()
+    from . import allure_service              # 局部导入避免环依赖
+    allure_service.purge(report_id)
 
 
 def list_reports(date_from: str = "", date_to: str = "", app: str = "",

@@ -10,10 +10,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>JDO 车机自动化测试平台</title>
+<title>APP 车机自动化测试平台</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <!-- 图标字体预加载：不等 CSS 解析完再排队，首屏图标即刻可用（URL 须与 CSS 内 @font-face 完全一致；
      字体请求走 CORS 模式，同源也必须带 crossorigin，否则会重复下载） -->
 <link rel="preload" href="vendor/fonts/tabler-icons.woff2?v3.5.0" as="font" type="font/woff2" crossorigin>
+<script>
+/* 图标字体就绪前隐藏 .ti 字形：字体没到时后备字体会把图标码位画成「方框叉」（tofu）。
+   就绪（或 3s 超时兜底）即恢复 —— 首次访问慢网络下图标"晚一点出现"但绝不显示乱码框。 */
+document.documentElement.classList.add('icons-loading');
+(function () {
+  var done = function () { document.documentElement.classList.remove('icons-loading'); };
+  if (document.fonts && document.fonts.load) {
+    document.fonts.load('12px tabler-icons').then(done, done);
+  }
+  setTimeout(done, 3000);
+})();
+</script>
 <link rel="stylesheet" href="vendor/tabler-icons.min.css">
 <link rel="stylesheet" href="css/tokens.css">
 <link rel="stylesheet" href="css/components.css">
@@ -22,13 +35,13 @@
 <body>
 <!-- .jdo 上的内联变量 = 默认「柔和」深色主题（与原型一致），主题切换由 js/theme.js 管理 -->
 <div class="jdo" style="--color-background-primary:#2b3646; --color-background-secondary:#323e4f; --color-background-tertiary:#1e2836; --color-text-primary:#e8edf4; --color-text-secondary:#98a4b5; --color-text-tertiary:#6b7889; --color-border-tertiary:rgba(255,255,255,0.08); --color-border-secondary:rgba(255,255,255,0.15); --color-text-info:#46c8d5; --color-background-info:rgba(70,200,213,0.15); --color-border-info:rgba(70,200,213,0.5); --color-text-success:#4dd497; --color-background-success:rgba(77,212,151,0.16); --color-text-danger:#ef7088; --color-background-danger:rgba(239,112,136,0.16); --color-text-warning:#e6b25f; --color-background-warning:rgba(230,178,95,0.16);">
-<h2 class="sr-only">JDO 车机自动化测试平台。</h2>
+<h2 class="sr-only">APP 车机自动化测试平台。</h2>
 
 <!-- 平台主框架：侧边栏 + 主区（顶部栏 + 内容）。主题切换已并入顶栏右侧。 -->
 <div id="frame" style="position:relative; display: flex; background: #232e3d; border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg); overflow: hidden; flex: 1; min-height: 0;">
   <div id="sidebar" style="width: 158px; flex-shrink: 0; border-right: 0.5px solid var(--color-border-tertiary); background: #1b2431; display:flex; flex-direction:column;">
     <div style="padding: 12px 13px; border-bottom: 0.5px solid var(--color-border-tertiary);">
-      <div style="display:flex;align-items:center;gap:8px;font-weight:500;font-size:13px;color:var(--color-text-primary);"><span style="width:24px;height:24px;border-radius:7px;background:var(--color-background-info);color:var(--color-text-info);display:flex;align-items:center;justify-content:center;"><i class="ti ti-car" style="font-size: 15px;" aria-hidden="true"></i></span>JDO 测试平台</div>
+      <div style="display:flex;align-items:center;gap:8px;font-weight:500;font-size:13px;color:var(--color-text-primary);"><span style="width:24px;height:24px;border-radius:7px;background:var(--color-background-info);color:var(--color-text-info);display:flex;align-items:center;justify-content:center;"><i class="ti ti-car" style="font-size: 15px;" aria-hidden="true"></i></span>APP 测试平台</div>
       <div style="font-size:10.5px;color:var(--color-text-tertiary);margin-top:5px;padding-left:32px;">车机生态自动化回归</div>
     </div>
     <div id="side" style="padding: 6px 8px 12px; flex:1; min-height:0; overflow-y:auto;"></div>
